@@ -1,0 +1,38 @@
+# ---- Secrets & local settings ----
+# Contains the Gemini API key - never commit!
+.env
+.env.*
+!.env.example
+
+# ---- Python ----
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+
+# ---- App runtime output ----
+app_error.log
+*.log
+
+# Working folders created when an SRT sits inside the project folder
+split/
+merge/
+translated_file/
+
+# Subtitle files (test inputs / outputs)
+*.srt
+
+# ---- Packaging (PyInstaller) ----
+build/
+dist/
+*.spec
+
+# ---- Editors ----
+.vscode/
+.idea/
+
+# ---- OS ----
+Thumbs.db
+desktop.ini
+.DS_Store
