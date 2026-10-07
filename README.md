@@ -70,10 +70,12 @@ All settings live in `.env` (see [`.env.example`](.env.example)) and can be edit
 | `CUSTOM_MERGE_DIR` | Folder for translated chunks | `merge` |
 | `CUSTOM_OUTPUT_DIR` | Folder for the final file | `translated_file` |
 | `CHUNK_SIZE` | Blocks per Gemini call | `150` |
+| `GEMINI_MODEL` | `gemini-3.8-flash` / `gemini-3.5-flash-lite` / `gemini-3.1-flash-lite` | `gemini-3.8-flash` |
+| `FLEX_MODE` | `1` = [Flex inference](https://ai.google.dev/gemini-api/docs/flex-inference): 50% cheaper, slower, falls back to standard if busy | `0` |
 | `THINKING_LEVEL` | Model thinking level: `low` / `medium` / `high` (thinking is billed as output) | `low` |
 | `UI_LANG` / `UI_THEME` | Interface language / theme | `he` / `system` |
 
-The Gemini model and the translation prompt are defined in `translator.py`.
+The list of models (with prices) and the translation prompt are defined in `translator.py`.
 
 ## Project structure
 

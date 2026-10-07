@@ -19,7 +19,7 @@ import webview
 from dotenv import dotenv_values, set_key
 
 from srt_utils import parse_srt, split_srt_file, merge_srt_files
-from translator import translate_directory
+from translator import translate_directory, MODELS, DEFAULT_MODEL
 
 if getattr(sys, "frozen", False):
     # Running as a PyInstaller EXE: bundled files (web/, icon) are unpacked to a temp
@@ -140,6 +140,9 @@ class Api:
             "defaults": DEFAULT_DIRS,
             "chunk": self._saved_chunk(),
             "thinking": self._thinking(),
+            "model": self._model(),
+            "flex": self._flex(),
+            "models": [{"id": k, **v} for k, v in MODELS.items()],
             "file": self._file_info() if self._file else None,
             "busy": self._busy,
         }
@@ -202,6 +205,23 @@ class Api:
     def _thinking(self):
         level = (read_env().get("THINKING_LEVEL", "") or DEFAULT_THINKING).strip().lower()
         return level if level in THINKING_LEVELS else DEFAULT_THINKING
+
+    def _flex(self):
+        return (read_env().get("FLEX_MODE", "") or "0").strip().lower() in ("1", "true", "yes", "on")
+
+    def save_flex(self, enabled):
+        write_env("FLEX_MODE", "1" if enabled else "0")
+        return self.get_state()
+
+    def _model(self):
+        model = (read_env().get("GEMINI_MODEL", "") or DEFAULT_MODEL).strip()
+        return model if model in MODELS else DEFAULT_MODEL
+
+    def save_model(self, model):
+        if model not in MODELS:
+            return {"error": "bad_model"}
+        write_env("GEMINI_MODEL", model)
+        return self.get_state()
 
     def save_thinking(self, level):
         if level not in THINKING_LEVELS:
@@ -276,7 +296,8 @@ class Api:
             self._send("progress", stage="translate", current=current, total=total, filename=filename)
 
         ok = translate_directory(dirs["split"], dirs["merge"], api_key=api_key,
-                                 progress_callback=progress, thinking_level=self._thinking())
+                                 progress_callback=progress, thinking_level=self._thinking(),
+                                 model=self._model(), flex=self._flex())
         if not ok:
             self._send("stage", stage="translate", status="error")
             raise RuntimeError("Some parts failed translation or validation. See the log above.")

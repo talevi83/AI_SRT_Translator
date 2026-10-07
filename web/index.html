@@ -109,6 +109,7 @@
           </div>
           <span class="hint" data-i18n="chunk_hint"></span>
         </div>
+        <button class="model-chip" id="model-chip" title=""></button>
         <button class="btn primary lg" id="run-pipeline">
           <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
           <span data-i18n="run_pipeline"></span>
@@ -200,6 +201,25 @@
           <button class="btn primary" id="save-key" data-i18n="save"></button>
         </div>
         <a href="#" class="link" id="get-key-link" data-i18n="get_key"></a>
+      </div>
+
+      <div class="card">
+        <h2 data-i18n="set_model_title"></h2>
+        <p class="muted" data-i18n="set_model_desc"></p>
+        <div class="choice" id="model-choice"></div>
+      </div>
+
+      <div class="card">
+        <div class="toggle-row">
+          <div>
+            <h2><span data-i18n="set_flex_title"></span> <span class="badge" data-i18n="flex_badge"></span></h2>
+            <p class="muted" data-i18n="set_flex_desc"></p>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="flex-toggle">
+            <span class="slider"></span>
+          </label>
+        </div>
       </div>
 
       <div class="card">

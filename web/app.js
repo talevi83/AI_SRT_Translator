@@ -22,6 +22,7 @@
     $("#api-key").placeholder = t("key_placeholder");
     renderHelp();
     renderKey();
+    renderModels();
     renderFile();
     document.title = t("brand");
   }
@@ -148,7 +149,7 @@
     $(".log-empty", box)?.remove();
     const line = document.createElement("div");
     let lvl = level;
-    if (lvl === "info" && /^(attempt \d|retrying)/i.test(msg)) lvl = "warn";
+    if (lvl === "info" && /^(attempt \d|retrying|flex |.* doesn't support thinking)/i.test(msg)) lvl = "warn";
     else if (lvl === "info" && /fail|error|mismatch|skipping|aborted/i.test(msg)) lvl = "error";
     if (lvl === "info" && /success|complete/i.test(msg)) lvl = "success";
     line.className = "log-line " + lvl;
@@ -242,6 +243,38 @@
     $("#set-output").value = s.settings.output; $("#set-output").placeholder = s.defaults.output;
     renderKey();
     renderThinking(s.thinking);
+    state.models = s.models || []; state.model = s.model; state.thinking = s.thinking; state.flex = !!s.flex;
+    $("#flex-toggle").checked = state.flex;
+    renderModels();
+  }
+  // rough token estimate for a ~42 min episode (see README)
+  const EP_IN = 20000, EP_OUT = 35000;
+  const prettyModel = id => id.replace(/^gemini-/, "Gemini ").replace(/-flash-lite$/, " Flash-Lite").replace(/-flash$/, " Flash");
+  function renderModels() {
+    const box = $("#model-choice");
+    if (!box || !state.models) return;
+    box.innerHTML = "";
+    state.models.forEach(m => {
+      const cost = (EP_IN * m.input + EP_OUT * m.output) / 1e6 * (state.flex ? 0.5 : 1);
+      const b = document.createElement("button");
+      b.dataset.model = m.id;
+      b.classList.toggle("on", m.id === state.model);
+      b.innerHTML = `<span class="choice-t" dir="ltr"></span><span class="choice-d"></span><span class="choice-p" dir="ltr"></span><span class="choice-c"></span>`;
+      $(".choice-t", b).textContent = prettyModel(m.id);
+      $(".choice-d", b).textContent = (t("model_desc") || {})[m.id] || "";
+      const k = state.flex ? 0.5 : 1;
+      $(".choice-p", b).textContent = `$${+(m.input * k).toFixed(3)} in · $${+(m.output * k).toFixed(3)} out` + (state.flex ? " · Flex" : "");
+      $(".choice-c", b).textContent = t("per_episode", { cost: "$" + cost.toFixed(2) });
+      b.addEventListener("click", async () => {
+        if (!api) return;
+        const res = await api.save_model(m.id);
+        if (handleError(res)) return;
+        applyState(res); toast(t("saved"), "success");
+      });
+      box.appendChild(b);
+    });
+    const chip = $("#model-chip");
+    if (chip && state.model) chip.textContent = `${prettyModel(state.model)} · ${t("think_" + (state.thinking || "low"))}` + (state.flex ? " · Flex" : "");
   }
   function renderThinking(level) {
     $$("#thinking-choice button").forEach(b => b.classList.toggle("on", b.dataset.level === level));
@@ -250,7 +283,7 @@
     if (!api) return;
     const res = await api.save_thinking(b.dataset.level);
     if (handleError(res)) return;
-    renderThinking(res.thinking); toast(t("saved"), "success");
+    applyState(res); toast(t("saved"), "success");
   }));
   $("#save-key").addEventListener("click", async () => {
     const res = await api.save_api_key($("#api-key").value);
@@ -264,6 +297,12 @@
     if (state.file) { state.file = await api.refresh_file(); renderFile(); }
     toast(t("saved"), "success");
   });
+  $("#flex-toggle").addEventListener("change", async e => {
+    if (!api) return;
+    const res = await api.save_flex(e.target.checked);
+    applyState(res); toast(t(res.flex ? "flex_on" : "flex_off"), "success");
+  });
+  $("#model-chip").addEventListener("click", () => go("settings"));
   $("#get-key-link").addEventListener("click", e => { e.preventDefault(); go("help"); });
 
   // ---------- help ----------
