@@ -21,12 +21,21 @@ from dotenv import dotenv_values, set_key
 from srt_utils import parse_srt, split_srt_file, merge_srt_files
 from translator import translate_directory
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if getattr(sys, "frozen", False):
+    # Running as a PyInstaller EXE: bundled files (web/, icon) are unpacked to a temp
+    # folder, while user files (.env, logs) live next to the EXE.
+    RESOURCE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    RESOURCE_DIR = BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 ENV_FILE = os.path.join(BASE_DIR, ".env")
-WEB_DIR = os.path.join(BASE_DIR, "web")
+WEB_DIR = os.path.join(RESOURCE_DIR, "web")
 
 DEFAULT_DIRS = {"split": "split", "merge": "merge", "output": "translated_file"}
 DEFAULT_CHUNK = 150
+DEFAULT_THINKING = "low"
+THINKING_LEVELS = ("low", "medium", "high")
 
 
 def read_env():
@@ -130,6 +139,7 @@ class Api:
             },
             "defaults": DEFAULT_DIRS,
             "chunk": self._saved_chunk(),
+            "thinking": self._thinking(),
             "file": self._file_info() if self._file else None,
             "busy": self._busy,
         }
@@ -187,6 +197,16 @@ class Api:
         if not key:
             return {"error": "empty_key"}
         write_env("GEMINI_API_KEY", key)
+        return self.get_state()
+
+    def _thinking(self):
+        level = (read_env().get("THINKING_LEVEL", "") or DEFAULT_THINKING).strip().lower()
+        return level if level in THINKING_LEVELS else DEFAULT_THINKING
+
+    def save_thinking(self, level):
+        if level not in THINKING_LEVELS:
+            return {"error": "bad_thinking"}
+        write_env("THINKING_LEVEL", level)
         return self.get_state()
 
     def save_ui_prefs(self, lang, theme):
@@ -255,7 +275,8 @@ class Api:
         def progress(current, total, filename):
             self._send("progress", stage="translate", current=current, total=total, filename=filename)
 
-        ok = translate_directory(dirs["split"], dirs["merge"], api_key=api_key, progress_callback=progress)
+        ok = translate_directory(dirs["split"], dirs["merge"], api_key=api_key,
+                                 progress_callback=progress, thinking_level=self._thinking())
         if not ok:
             self._send("stage", stage="translate", status="error")
             raise RuntimeError("Some parts failed translation or validation. See the log above.")
@@ -356,7 +377,7 @@ def main():
         except Exception:
             traceback.print_exc()
 
-    icon = os.path.join(BASE_DIR, "icon.ico")
+    icon = os.path.join(RESOURCE_DIR, "icon.ico")
     webview.start(bind_drag_and_drop, icon=icon if os.path.exists(icon) else None)
 
 

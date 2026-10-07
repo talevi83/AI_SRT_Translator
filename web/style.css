@@ -225,6 +225,20 @@ body.busy .btn.primary:disabled::after {
 .key-status.ok { color: var(--ok); background: rgba(34,197,94,.12); }
 .key-status.missing { color: var(--warn); background: rgba(245,158,11,.12); }
 
+/* ============ CHOICE (thinking level) ============ */
+.choice { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.choice button {
+  display: flex; flex-direction: column; gap: 2px; align-items: flex-start; text-align: start;
+  padding: 12px 14px; border-radius: var(--radius-sm); cursor: pointer;
+  border: 1.5px solid var(--border); background: var(--panel-2);
+  transition: border-color .15s, background .15s;
+}
+.choice button:hover { border-color: var(--accent); }
+.choice button.on { border-color: var(--accent); background: var(--accent-soft); box-shadow: 0 0 0 3px var(--accent-soft); }
+.choice-t { font-weight: 700; }
+.choice button.on .choice-t { color: var(--accent); }
+.choice-d { font-size: 12.5px; color: var(--text-2); }
+
 /* ============ IO ROWS ============ */
 .io-row { display: flex; align-items: center; gap: 12px; }
 .io-l { width: 44px; flex: none; font-size: 12.5px; font-weight: 600; color: var(--text-3); }

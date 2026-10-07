@@ -29,7 +29,7 @@ A desktop app that translates `.srt` subtitle files from **English to Hebrew** u
    git clone <repo-url>
    cd AI_SRT_Translator
    ```
-2. Double-click **`run.bat`**.
+2. Double-click **`running_script.bat`**.
    On first run it creates a virtual environment and installs the requirements, then opens the app.
 3. Go to **Settings** and paste your Gemini API key
    (or copy `.env.example` to `.env` and fill in `GEMINI_API_KEY`).
@@ -51,6 +51,14 @@ translated_file/
   └── Movie_translated.srt
 ```
 
+## Building a standalone EXE
+
+Double-click **`build.bat`**. It installs PyInstaller and packs the whole app into a single
+`dist\AI SRT Translator.exe` with the app icon — no Python needed to run it.
+
+- Your `.env` (API key and settings) is copied next to the EXE on the first build; keep it in the same folder.
+- Rebuild after every code change.
+
 ## Configuration
 
 All settings live in `.env` (see [`.env.example`](.env.example)) and can be edited from the Settings screen:
@@ -62,6 +70,7 @@ All settings live in `.env` (see [`.env.example`](.env.example)) and can be edit
 | `CUSTOM_MERGE_DIR` | Folder for translated chunks | `merge` |
 | `CUSTOM_OUTPUT_DIR` | Folder for the final file | `translated_file` |
 | `CHUNK_SIZE` | Blocks per Gemini call | `150` |
+| `THINKING_LEVEL` | Model thinking level: `low` / `medium` / `high` (thinking is billed as output) | `low` |
 | `UI_LANG` / `UI_THEME` | Interface language / theme | `he` / `system` |
 
 The Gemini model and the translation prompt are defined in `translator.py`.
@@ -69,11 +78,12 @@ The Gemini model and the translation prompt are defined in `translator.py`.
 ## Project structure
 
 ```
-app.py           # pywebview window + Python API exposed to the UI
-srt_utils.py     # SRT parsing, splitting, merging and translation validation
-translator.py    # Gemini translation with retries
-web/             # UI: index.html, style.css, app.js, i18n.js (Hebrew / English strings)
-run.bat          # Creates the venv, installs requirements, launches the app
+app.py             # pywebview window + Python API exposed to the UI
+srt_utils.py       # SRT parsing, splitting, merging and translation validation
+translator.py      # Gemini translation with retries
+web/               # UI: index.html, style.css, app.js, i18n.js (Hebrew / English strings)
+running_script.bat # Creates the venv, installs requirements, launches the app
+build.bat          # Builds a standalone EXE with PyInstaller
 ```
 
 ## Troubleshooting

@@ -241,7 +241,17 @@
     $("#set-merge").value = s.settings.merge; $("#set-merge").placeholder = s.defaults.merge;
     $("#set-output").value = s.settings.output; $("#set-output").placeholder = s.defaults.output;
     renderKey();
+    renderThinking(s.thinking);
   }
+  function renderThinking(level) {
+    $$("#thinking-choice button").forEach(b => b.classList.toggle("on", b.dataset.level === level));
+  }
+  $$("#thinking-choice button").forEach(b => b.addEventListener("click", async () => {
+    if (!api) return;
+    const res = await api.save_thinking(b.dataset.level);
+    if (handleError(res)) return;
+    renderThinking(res.thinking); toast(t("saved"), "success");
+  }));
   $("#save-key").addEventListener("click", async () => {
     const res = await api.save_api_key($("#api-key").value);
     if (handleError(res)) return;

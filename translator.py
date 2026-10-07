@@ -5,7 +5,31 @@ from google.genai import types
 
 from srt_utils import parse_srt_text, validate_translation
 
-def translate_file(client, file_path, output_path, retries=3, delay=5):
+MODEL = 'gemini-3.8-flash'
+THINKING_LEVELS = ("low", "medium", "high")
+
+
+def build_config(system_prompt, thinking_level=None):
+    """Generation config; thinking_level controls how much the model 'thinks' (and costs)."""
+    kwargs = dict(system_instruction=system_prompt, temperature=0.2)
+    if thinking_level in THINKING_LEVELS:
+        try:
+            kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=thinking_level)
+        except Exception as e:  # older google-genai without thinking_level support
+            print(f"Thinking level not supported by this SDK version, using model default ({e})")
+    return types.GenerateContentConfig(**kwargs)
+
+
+def log_usage(response):
+    usage = getattr(response, "usage_metadata", None)
+    if not usage:
+        return
+    prompt = getattr(usage, "prompt_token_count", None) or 0
+    output = getattr(usage, "candidates_token_count", None) or 0
+    thoughts = getattr(usage, "thoughts_token_count", None) or 0
+    print(f"Tokens - input: {prompt:,} | output: {output:,} | thinking: {thoughts:,}")
+
+def translate_file(client, file_path, output_path, retries=3, delay=5, thinking_level=None):
     """
     Reads an SRT file, translates its content using Gemini API,
     and writes the translated content to the output path.
@@ -33,13 +57,11 @@ def translate_file(client, file_path, output_path, retries=3, delay=5):
     for attempt in range(1, retries + 1):
         try:
             chat = client.chats.create(
-                model='gemini-3.8-flash',
-                config=types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    temperature=0.2,
-                )
+                model=MODEL,
+                config=build_config(system_prompt, thinking_level),
             )
             response = chat.send_message(content)
+            log_usage(response)
             
             # Clean up potential markdown formatting returned by the model
             translated_text = response.text
@@ -72,7 +94,7 @@ def translate_file(client, file_path, output_path, retries=3, delay=5):
                 print(f"Max retries reached. Skipping {os.path.basename(file_path)}.")
                 return False
 
-def translate_directory(input_dir, output_dir, api_key=None, progress_callback=None):
+def translate_directory(input_dir, output_dir, api_key=None, progress_callback=None, thinking_level=None):
     """
     Iterates over all SRT files in the input directory,
     translates each, and saves it to the output directory.
@@ -97,7 +119,7 @@ def translate_directory(input_dir, output_dir, api_key=None, progress_callback=N
         print(f"No SRT files found in {input_dir}")
         return False
 
-    print(f"Found {len(files)} files to translate. Starting translation...")
+    print(f"Found {len(files)} files to translate. Model: {MODEL}, thinking: {thinking_level or 'model default'}")
 
     success_count = 0
     for idx, file_name in enumerate(files):
@@ -105,7 +127,7 @@ def translate_directory(input_dir, output_dir, api_key=None, progress_callback=N
         output_file = os.path.join(output_dir, file_name)
         
         print(f"Processing: {file_name}")
-        if translate_file(client, input_file, output_file):
+        if translate_file(client, input_file, output_file, thinking_level=thinking_level):
             success_count += 1
             
         if progress_callback:
