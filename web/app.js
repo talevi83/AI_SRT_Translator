@@ -24,6 +24,7 @@
     renderHelp();
     renderKey();
     renderModels();
+    renderLangs();
     renderFile();
     document.title = t("brand");
   }
@@ -69,6 +70,7 @@
   // ---------- file ----------
   function renderFile() {
     const f = state.file;
+    renderLangs();
     $("#drop").classList.toggle("hidden", !!f);
     $("#file-card").classList.toggle("hidden", !f);
     if (!f) {
@@ -264,8 +266,45 @@
     if (s.workers) $("#workers").value = s.workers;
     $("#glossary-toggle").checked = !!s.auto_glossary;
     if (document.activeElement !== $("#instructions")) $("#instructions").value = s.instructions || "";
+    state.langs = s.languages || []; state.source = s.source_lang; state.target = s.target_lang;
+    state.naming = s.naming;
+    $("#units-toggle").checked = !!s.convert_units;
+    $("#bom-toggle").checked = !!s.bom;
     renderModels();
+    renderLangs();
   }
+  const langName = code => {
+    try { return new Intl.DisplayNames([state.lang], { type: "language" }).of(code); } catch { return code; }
+  };
+  function renderLangs() {
+    if (!state.langs) return;
+    const fill = (sel, codes, value, auto) => {
+      sel.innerHTML = "";
+      if (auto) sel.add(new Option(t("lang_auto"), "auto"));
+      codes.map(c => [c, langName(c)]).sort((a, b) => a[1].localeCompare(b[1], state.lang))
+        .forEach(([c, n]) => sel.add(new Option(n, c)));
+      sel.value = value;
+    };
+    fill($("#source-lang"), state.langs, state.source || "auto", true);
+    fill($("#target-lang"), state.langs, state.target || "he", false);
+    $$("#naming-choice button").forEach(b => b.classList.toggle("on", b.dataset.naming === state.naming));
+    const base = state.file ? state.file.name.replace(/\.srt$/i, "") : "Movie";
+    $("#naming-lang-example").textContent = `${base}.${state.target || "he"}.srt`;
+    $("#naming-suffix-example").textContent = `${base}_translated.srt`;
+  }
+  async function saveTranslationPrefs(patch = {}) {
+    if (!api) return;
+    const res = await api.save_translation_prefs({
+      source_lang: $("#source-lang").value, target_lang: $("#target-lang").value,
+      convert_units: $("#units-toggle").checked, naming: state.naming, bom: $("#bom-toggle").checked, ...patch,
+    });
+    if (handleError(res)) { renderLangs(); return; }
+    applyState(res);
+    if (state.file) { state.file = await api.refresh_file(); renderFile(); }
+    toast(t("saved"), "success");
+  }
+  ["#source-lang", "#target-lang", "#units-toggle", "#bom-toggle"].forEach(s => $(s).addEventListener("change", () => saveTranslationPrefs()));
+  $$("#naming-choice button").forEach(b => b.addEventListener("click", () => saveTranslationPrefs({ naming: b.dataset.naming })));
   // rough token estimate for a ~42 min episode (see README)
   // Only subtitle text goes to the model, so output is mostly the translated text itself
   const EP_IN = 20000, EP_OUT = 20000;
@@ -294,7 +333,8 @@
       box.appendChild(b);
     });
     const chip = $("#model-chip");
-    if (chip && state.model) chip.textContent = `${prettyModel(state.model)} · ${t("think_" + (state.thinking || "low"))}` + (state.flex ? " · Flex" : "");
+    const pair = `${(state.source && state.source !== "auto" ? state.source : "auto").toUpperCase()} → ${(state.target || "he").toUpperCase()}`;
+    if (chip && state.model) chip.textContent = `${pair} · ${prettyModel(state.model)} · ${t("think_" + (state.thinking || "low"))}` + (state.flex ? " · Flex" : "");
   }
   function renderThinking(level) {
     $$("#thinking-choice button").forEach(b => b.classList.toggle("on", b.dataset.level === level));

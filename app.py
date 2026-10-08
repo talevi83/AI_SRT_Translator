@@ -19,7 +19,7 @@ import webview
 from dotenv import dotenv_values, set_key
 
 from srt_utils import compare_structure, list_srt_parts, merge_srt_files, parse_srt, split_srt_file
-from translator import (DEFAULT_MODEL, MODELS, RTL_LANGUAGES, Cancelled, TranslationEngine,
+from translator import (DEFAULT_MODEL, LANGUAGES, MODELS, RTL_LANGUAGES, Cancelled, TranslationEngine,
                         load_or_build_glossary, translate_directory)
 
 APP_NAME = "AI SRT Translator"
@@ -45,6 +45,7 @@ DEFAULT_DIRS = {"split": "split", "merge": "merge", "output": "translated_file"}
 DEFAULT_CHUNK = 150
 DEFAULT_THINKING = "low"
 THINKING_LEVELS = ("low", "medium", "high")
+NAMING_MODES = ("lang", "suffix")   # Movie.he.srt  /  Movie_translated.srt
 DEFAULT_WORKERS = 3
 MAX_WORKERS = 8
 
@@ -131,7 +132,12 @@ class Api:
 
     def _final_path(self):
         name = os.path.splitext(os.path.basename(self._file))[0]
-        return os.path.join(self._dirs()["output"], f"{name}_translated.srt")
+        if self._naming() == "suffix":
+            filename = f"{name}_translated.srt"
+        else:
+            # Movie.he.srt - video players load it automatically next to Movie.mkv
+            filename = f"{name}.{self._target_lang()}.srt"
+        return os.path.join(self._dirs()["output"], filename)
 
     def _api_key(self):
         return read_env().get("GEMINI_API_KEY", "").strip()
@@ -163,6 +169,12 @@ class Api:
             "workers": self._workers(),
             "auto_glossary": self._auto_glossary(),
             "instructions": self._instructions(),
+            "languages": list(LANGUAGES),
+            "source_lang": self._source_lang(),
+            "target_lang": self._target_lang(),
+            "convert_units": self._env_flag("CONVERT_UNITS", True),
+            "naming": self._naming(),
+            "bom": self._env_flag("SUBTITLE_BOM", False),
             "models": [{"id": k, **v} for k, v in MODELS.items()],
             "file": self._file_info() if self._file else None,
             "busy": self._busy,
@@ -286,8 +298,36 @@ class Api:
             f.write((text or "").strip() + "\n")
         return self.get_state()
 
+    def _env_flag(self, key, default):
+        value = (read_env().get(key, "") or "").strip().lower()
+        return default if not value else value in ("1", "true", "yes", "on")
+
+    def _source_lang(self):
+        lang = (read_env().get("SOURCE_LANG", "") or "auto").strip()
+        return lang if lang in LANGUAGES else "auto"
+
     def _target_lang(self):
-        return (read_env().get("TARGET_LANG", "") or "he").strip()
+        lang = (read_env().get("TARGET_LANG", "") or "he").strip()
+        return lang if lang in LANGUAGES else "he"
+
+    def _naming(self):
+        mode = (read_env().get("OUTPUT_NAMING", "") or "lang").strip()
+        return mode if mode in NAMING_MODES else "lang"
+
+    def save_translation_prefs(self, prefs):
+        source, target = prefs.get("source_lang", "auto"), prefs.get("target_lang", "he")
+        naming = prefs.get("naming", "lang")
+        if (source != "auto" and source not in LANGUAGES) or target not in LANGUAGES or naming not in NAMING_MODES:
+            return {"error": "bad_lang"}
+        if source == target:
+            return {"error": "same_lang"}
+        write_env("SOURCE_LANG", source)
+        write_env("TARGET_LANG", target)
+        write_env("CONVERT_UNITS", "1" if prefs.get("convert_units", True) else "0")
+        write_env("OUTPUT_NAMING", naming)
+        write_env("SUBTITLE_BOM", "1" if prefs.get("bom") else "0")
+        state = self.get_state()
+        return state
 
     def save_ui_prefs(self, lang, theme):
         write_env("UI_LANG", lang)
@@ -371,7 +411,9 @@ class Api:
             self._send("usage", **engine.usage)
 
         engine = TranslationEngine(api_key=api_key, model=self._model(), thinking_level=self._thinking(),
-                                   flex=self._flex(), target_lang=self._target_lang(),
+                                   flex=self._flex(), source_lang=self._source_lang(),
+                                   target_lang=self._target_lang(),
+                                   convert_units=self._env_flag("CONVERT_UNITS", True),
                                    instructions=self._instructions(), cancel_event=self._cancel)
         try:
             if self._auto_glossary():
@@ -404,7 +446,8 @@ class Api:
         self._send("stage", stage="merge", status="active")
         prepare_directory(dirs["output"], clear=False)
         final = self._final_path()
-        count = merge_srt_files(files, final, rtl_fix=self._target_lang() in RTL_LANGUAGES)
+        count = merge_srt_files(files, final, rtl_fix=self._target_lang() in RTL_LANGUAGES,
+                                bom=self._env_flag("SUBTITLE_BOM", False))
         ok, reason = compare_structure(parse_srt(self._file), parse_srt(final))
         if ok:
             self._log(f"Merged {len(files)} files ({count} blocks) -> {final}", "success")

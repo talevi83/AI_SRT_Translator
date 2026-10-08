@@ -195,6 +195,14 @@ input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-so
 input::placeholder { color: var(--text-3); }
 .field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; font-weight: 600; color: var(--text-2); }
 .field-row { display: flex; gap: 10px; }
+.grid2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
+select {
+  height: 40px; padding: 0 12px; border-radius: var(--radius-sm); border: 1px solid var(--border);
+  background: var(--panel-2); color: inherit; font: inherit; outline: none; width: 100%; cursor: pointer;
+}
+select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.toggle-row.sub { margin-top: 6px; padding-top: 14px; border-top: 1px solid var(--border); }
+.toggle-row.sub h3 { margin: 0 0 4px; font-size: 14px; }
 .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
 .actions { display: flex; gap: 10px; }
 

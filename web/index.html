@@ -109,7 +109,7 @@
           </div>
           <span class="hint" data-i18n="chunk_hint"></span>
         </div>
-        <button class="model-chip" id="model-chip" title=""></button>
+        <button class="model-chip" id="model-chip" title="" dir="ltr"></button>
         <div class="run-actions">
           <button class="btn danger cancel-btn" data-i18n="cancel"></button>
           <button class="btn primary lg" id="run-pipeline">
@@ -204,6 +204,42 @@
           <button class="btn primary" id="save-key" data-i18n="save"></button>
         </div>
         <a href="#" class="link" id="get-key-link" data-i18n="get_key"></a>
+      </div>
+
+      <div class="card">
+        <h2 data-i18n="set_lang_title"></h2>
+        <div class="grid2">
+          <label class="field"><span data-i18n="source_lang"></span><select id="source-lang"></select></label>
+          <label class="field"><span data-i18n="target_lang"></span><select id="target-lang"></select></label>
+        </div>
+        <div class="toggle-row sub">
+          <div>
+            <h3 data-i18n="units_title"></h3>
+            <p class="muted" data-i18n="units_desc"></p>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="units-toggle">
+            <span class="slider"></span>
+          </label>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2 data-i18n="set_output_title"></h2>
+        <div class="choice" id="naming-choice">
+          <button data-naming="lang"><span class="choice-t" id="naming-lang-example" dir="ltr"></span><span class="choice-d" data-i18n="naming_lang_d"></span></button>
+          <button data-naming="suffix"><span class="choice-t" id="naming-suffix-example" dir="ltr"></span><span class="choice-d" data-i18n="naming_suffix_d"></span></button>
+        </div>
+        <div class="toggle-row sub">
+          <div>
+            <h3 data-i18n="bom_title"></h3>
+            <p class="muted" data-i18n="bom_desc"></p>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="bom-toggle">
+            <span class="slider"></span>
+          </label>
+        </div>
       </div>
 
       <div class="card">
