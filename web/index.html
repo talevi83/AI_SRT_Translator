@@ -74,7 +74,10 @@
           <div class="drop-title" data-i18n="drop_title"></div>
           <div class="drop-sub" data-i18n="drop_sub"></div>
         </div>
-        <button class="btn ghost" id="browse-btn" data-i18n="browse"></button>
+        <div class="drop-actions">
+          <button class="btn ghost" id="folder-btn" data-i18n="browse_folder"></button>
+          <button class="btn ghost" id="browse-btn" data-i18n="browse"></button>
+        </div>
       </div>
 
       <div class="file-card hidden" id="file-card">
@@ -89,6 +92,14 @@
           <div class="stat"><div class="stat-v" id="stat-parts">–</div><div class="stat-l" data-i18n="stat_parts"></div></div>
         </div>
         <button class="btn ghost sm" id="change-btn" data-i18n="change"></button>
+      </div>
+
+      <div class="queue hidden" id="queue">
+        <div class="queue-head">
+          <span id="queue-title"></span>
+          <button class="link-btn" id="queue-add" data-i18n="queue_add"></button>
+        </div>
+        <div class="queue-list" id="queue-list"></div>
       </div>
     </section>
 
@@ -109,11 +120,14 @@
           </div>
           <span class="hint" data-i18n="chunk_hint"></span>
         </div>
-        <button class="model-chip" id="model-chip" title=""></button>
-        <button class="btn primary lg" id="run-pipeline">
-          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-          <span data-i18n="run_pipeline"></span>
-        </button>
+        <button class="model-chip" id="model-chip" title="" dir="ltr"></button>
+        <div class="run-actions">
+          <button class="btn danger cancel-btn" data-i18n="cancel"></button>
+          <button class="btn primary lg" id="run-pipeline">
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+            <span data-i18n="run_pipeline"></span>
+          </button>
+        </div>
       </div>
 
       <div class="stages" id="stages">
@@ -166,7 +180,7 @@
       <div class="card">
         <div class="io-row"><span class="io-l" data-i18n="io_in"></span><code class="io-path" id="trans-in" dir="ltr">–</code><span class="pill" id="trans-in-count"></span></div>
         <div class="io-row"><span class="io-l" data-i18n="io_out"></span><code class="io-path" id="trans-out" dir="ltr">–</code></div>
-        <div class="actions"><button class="btn primary" id="run-translate" data-i18n="run_translate"></button></div>
+        <div class="actions"><button class="btn danger cancel-btn" data-i18n="cancel"></button><button class="btn primary" id="run-translate" data-i18n="run_translate"></button></div>
         <div class="progress"><div class="progress-bar" id="trans-progress"></div></div>
         <div class="muted" id="trans-status"></div>
       </div>
@@ -204,6 +218,42 @@
       </div>
 
       <div class="card">
+        <h2 data-i18n="set_lang_title"></h2>
+        <div class="grid2">
+          <label class="field"><span data-i18n="source_lang"></span><select id="source-lang"></select></label>
+          <label class="field"><span data-i18n="target_lang"></span><select id="target-lang"></select></label>
+        </div>
+        <div class="toggle-row sub">
+          <div>
+            <h3 data-i18n="units_title"></h3>
+            <p class="muted" data-i18n="units_desc"></p>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="units-toggle">
+            <span class="slider"></span>
+          </label>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2 data-i18n="set_output_title"></h2>
+        <div class="choice" id="naming-choice">
+          <button data-naming="lang"><span class="choice-t" id="naming-lang-example" dir="ltr"></span><span class="choice-d" data-i18n="naming_lang_d"></span></button>
+          <button data-naming="suffix"><span class="choice-t" id="naming-suffix-example" dir="ltr"></span><span class="choice-d" data-i18n="naming_suffix_d"></span></button>
+        </div>
+        <div class="toggle-row sub">
+          <div>
+            <h3 data-i18n="bom_title"></h3>
+            <p class="muted" data-i18n="bom_desc"></p>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="bom-toggle">
+            <span class="slider"></span>
+          </label>
+        </div>
+      </div>
+
+      <div class="card">
         <h2 data-i18n="set_model_title"></h2>
         <p class="muted" data-i18n="set_model_desc"></p>
         <div class="choice" id="model-choice"></div>
@@ -229,6 +279,40 @@
           <button data-level="low"><span class="choice-t" data-i18n="think_low"></span><span class="choice-d" data-i18n="think_low_d"></span></button>
           <button data-level="medium"><span class="choice-t" data-i18n="think_medium"></span><span class="choice-d" data-i18n="think_medium_d"></span></button>
           <button data-level="high"><span class="choice-t" data-i18n="think_high"></span><span class="choice-d" data-i18n="think_high_d"></span></button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="toggle-row">
+          <div>
+            <h2 data-i18n="set_glossary_title"></h2>
+            <p class="muted" data-i18n="set_glossary_desc"></p>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="glossary-toggle">
+            <span class="slider"></span>
+          </label>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2 data-i18n="set_instr_title"></h2>
+        <p class="muted" data-i18n="set_instr_desc"></p>
+        <textarea id="instructions" rows="5" dir="auto" spellcheck="false"></textarea>
+        <div class="actions"><button class="btn primary" id="save-instructions" data-i18n="save"></button></div>
+      </div>
+
+      <div class="card">
+        <div class="toggle-row">
+          <div>
+            <h2 data-i18n="set_workers_title"></h2>
+            <p class="muted" data-i18n="set_workers_desc"></p>
+          </div>
+          <div class="stepper" id="workers-stepper">
+            <button data-step="-1">−</button>
+            <input type="number" id="workers" value="3" min="1" max="8" dir="ltr">
+            <button data-step="1">+</button>
+          </div>
         </div>
       </div>
 
@@ -266,10 +350,24 @@
       <button class="btn ghost sm" id="open-folder" data-i18n="open_folder"></button>
     </div>
 
+    <!-- Quality check -->
+    <div class="qa hidden" id="qa">
+      <div class="qa-head">
+        <div class="qa-title" id="qa-title"></div>
+        <div class="qa-chips" id="qa-chips"></div>
+        <button class="btn primary sm" id="run-fix"></button>
+      </div>
+      <details class="qa-details">
+        <summary data-i18n="qa_show"></summary>
+        <div class="qa-list" id="qa-list"></div>
+      </details>
+    </div>
+
     <!-- Log -->
     <section class="log-wrap" id="log-wrap">
       <div class="log-head">
         <span data-i18n="log_title"></span>
+        <span class="usage-chip hidden" id="usage-chip" dir="ltr"></span>
         <button class="link-btn" id="clear-log" data-i18n="clear"></button>
       </div>
       <div class="log" id="log" dir="ltr"><div class="log-empty" data-i18n="log_empty" dir="auto"></div></div>

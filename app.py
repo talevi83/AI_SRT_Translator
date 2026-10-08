@@ -18,24 +18,37 @@ import traceback
 import webview
 from dotenv import dotenv_values, set_key
 
-from srt_utils import parse_srt, split_srt_file, merge_srt_files
-from translator import translate_directory, MODELS, DEFAULT_MODEL
+from srt_utils import compare_structure, list_srt_parts, merge_srt_files, parse_srt, split_srt_file
+import qa
+from translator import (DEFAULT_MODEL, LANGUAGES, MODELS, RTL_LANGUAGES, Cancelled, TranslationEngine,
+                        load_or_build_glossary, looks_translated, translate_directory)
+
+APP_NAME = "AI SRT Translator"
 
 if getattr(sys, "frozen", False):
-    # Running as a PyInstaller EXE: bundled files (web/, icon) are unpacked to a temp
-    # folder, while user files (.env, logs) live next to the EXE.
+    # Running as a PyInstaller build: bundled files (web/, icon) are unpacked to a temp
+    # folder, while user files (.env, logs) live next to the executable.
     RESOURCE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
     BASE_DIR = os.path.dirname(sys.executable)
+    if sys.platform == "darwin":
+        # Inside a .app the executable sits in Contents/MacOS, which is replaced on every
+        # update and may be read-only - keep user files in Application Support instead.
+        BASE_DIR = os.path.join(os.path.expanduser("~/Library/Application Support"), APP_NAME)
+        os.makedirs(BASE_DIR, exist_ok=True)
 else:
     RESOURCE_DIR = BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 ENV_FILE = os.path.join(BASE_DIR, ".env")
+INSTRUCTIONS_FILE = os.path.join(BASE_DIR, "instructions.txt")
 WEB_DIR = os.path.join(RESOURCE_DIR, "web")
 
 DEFAULT_DIRS = {"split": "split", "merge": "merge", "output": "translated_file"}
 DEFAULT_CHUNK = 150
 DEFAULT_THINKING = "low"
 THINKING_LEVELS = ("low", "medium", "high")
+NAMING_MODES = ("lang", "suffix")   # Movie.he.srt  /  Movie_translated.srt
+DEFAULT_WORKERS = 3
+MAX_WORKERS = 8
 
 
 def read_env():
@@ -71,18 +84,24 @@ class LogStream:
     def __init__(self, emit):
         self.emit = emit
         self.buffer = ""
+        self.lock = threading.Lock()  # translation workers print from several threads
 
     def write(self, text):
-        self.buffer += text
-        while "\n" in self.buffer:
-            line, self.buffer = self.buffer.split("\n", 1)
-            if line.strip():
-                self.emit(line)
+        with self.lock:
+            self.buffer += text
+            lines = []
+            while "\n" in self.buffer:
+                line, self.buffer = self.buffer.split("\n", 1)
+                if line.strip():
+                    lines.append(line)
+        for line in lines:
+            self.emit(line)
 
     def flush(self):
-        if self.buffer.strip():
-            self.emit(self.buffer)
-        self.buffer = ""
+        with self.lock:
+            rest, self.buffer = self.buffer, ""
+        if rest.strip():
+            self.emit(rest)
 
 
 class Api:
@@ -91,6 +110,10 @@ class Api:
         self._file = None
         self._busy = False
         self._lock = threading.Lock()
+        self._cancel = threading.Event()
+        self._queue = []          # [{"path", "status", "final", "error"}] - files for a batch run
+        self._usage_base = {}     # usage of earlier files in the current batch
+        self._usage_total = {}
 
     # ---------- plumbing ----------
     def _send(self, event, **data):
@@ -101,19 +124,31 @@ class Api:
     def _log(self, message, level="info"):
         self._send("log", message=message, level=level)
 
-    def _dirs(self):
+    def _dirs(self, path=None):
+        path = path or self._file
         env = read_env()
-        base = os.path.dirname(self._file)
+        base = os.path.dirname(path)
+        stem = os.path.splitext(os.path.basename(path))[0]
         names = {
             "split": env.get("CUSTOM_SPLIT_DIR", "").strip() or DEFAULT_DIRS["split"],
             "merge": env.get("CUSTOM_MERGE_DIR", "").strip() or DEFAULT_DIRS["merge"],
             "output": env.get("CUSTOM_OUTPUT_DIR", "").strip() or DEFAULT_DIRS["output"],
         }
-        return {k: os.path.join(base, v) for k, v in names.items()}
+        dirs = {k: os.path.normpath(os.path.join(base, v)) for k, v in names.items()}
+        # Each source file gets its own working folders, so several files in one folder don't mix
+        dirs["split"] = os.path.join(dirs["split"], stem)
+        dirs["merge"] = os.path.join(dirs["merge"], stem)
+        return dirs
 
-    def _final_path(self):
-        name = os.path.splitext(os.path.basename(self._file))[0]
-        return os.path.join(self._dirs()["output"], f"{name}_translated.srt")
+    def _final_path(self, path=None):
+        path = path or self._file
+        name = os.path.splitext(os.path.basename(path))[0]
+        if self._naming() == "suffix":
+            filename = f"{name}_translated.srt"
+        else:
+            # Movie.he.srt - video players load it automatically next to Movie.mkv
+            filename = f"{name}.{self._target_lang()}.srt"
+        return os.path.join(self._dirs(path)["output"], filename)
 
     def _api_key(self):
         return read_env().get("GEMINI_API_KEY", "").strip()
@@ -142,8 +177,18 @@ class Api:
             "thinking": self._thinking(),
             "model": self._model(),
             "flex": self._flex(),
+            "workers": self._workers(),
+            "auto_glossary": self._auto_glossary(),
+            "instructions": self._instructions(),
+            "languages": list(LANGUAGES),
+            "source_lang": self._source_lang(),
+            "target_lang": self._target_lang(),
+            "convert_units": self._env_flag("CONVERT_UNITS", True),
+            "naming": self._naming(),
+            "bom": self._env_flag("SUBTITLE_BOM", False),
             "models": [{"id": k, **v} for k, v in MODELS.items()],
             "file": self._file_info() if self._file else None,
+            "queue": self._queue_info(),
             "busy": self._busy,
         }
         return state
@@ -163,27 +208,95 @@ class Api:
             "final": final if os.path.exists(final) else None,
         }
 
-    def pick_file(self):
+    def _dialog(self, kind, **kwargs):
         dialog = getattr(webview, "FileDialog", None)
-        dialog_type = dialog.OPEN if dialog else webview.OPEN_DIALOG
-        result = self._window.create_file_dialog(
-            dialog_type, file_types=("SRT files (*.srt)", "All files (*.*)")
-        )
+        types_ = {"open": (dialog.OPEN if dialog else webview.OPEN_DIALOG),
+                  "folder": (dialog.FOLDER if dialog else webview.FOLDER_DIALOG)}
+        result = self._window.create_file_dialog(types_[kind], **kwargs)
         if not result:
-            return None
-        path = result[0] if isinstance(result, (list, tuple)) else result
-        return self.set_file(path)
+            return []
+        return list(result) if isinstance(result, (list, tuple)) else [result]
+
+    def pick_file(self):
+        paths = self._dialog("open", allow_multiple=True,
+                             file_types=("SRT files (*.srt)", "All files (*.*)"))
+        return self.set_files(paths) if paths else None
+
+    def pick_folder(self):
+        folders = self._dialog("folder")
+        return self.set_files(folders) if folders else None
+
+    def _is_output_name(self, name):
+        lower = name.lower()
+        return lower.endswith("_translated.srt") or lower.endswith(f".{self._target_lang()}.srt")
+
+    def _expand(self, paths):
+        """Files as given, folders expanded to the source SRT files directly inside them."""
+        files = []
+        for path in paths:
+            if os.path.isdir(path):
+                for name in sorted(os.listdir(path), key=str.lower):
+                    full = os.path.join(path, name)
+                    if os.path.isfile(full) and name.lower().endswith(".srt") and not self._is_output_name(name):
+                        files.append(full)
+            elif os.path.isfile(path) and path.lower().endswith(".srt"):
+                files.append(path)
+        seen = set()
+        return [f for f in files if not (f in seen or seen.add(f))]
+
+    def set_files(self, paths):
+        if self._busy:
+            return {"error": "busy"}
+        paths = [p for p in (paths or []) if p]
+        if len(paths) == 1 and os.path.isfile(paths[0]):
+            return self.set_file(paths[0])
+        files = self._expand(paths)
+        if not files:
+            return {"error": "no_srt_in_folder" if any(os.path.isdir(p) for p in paths) else "not_srt"}
+        if len(files) == 1:
+            return self.set_file(files[0])
+        self._queue = [{"path": f, "status": "pending", "final": None, "error": ""} for f in files]
+        self._file = files[0]
+        return {"file": self._file_info(), "queue": self._queue_info()}
 
     def set_file(self, path):
+        if self._busy:
+            return {"error": "busy"}
         if not path or not os.path.isfile(path):
             return {"error": "file_not_found"}
         if not path.lower().endswith(".srt"):
             return {"error": "not_srt"}
         self._file = path
+        self._queue = []
         info = self._file_info()
         if info["blocks"] == 0:
-            return {"error": "empty_srt", "file": info}
-        return {"file": info}
+            return {"error": "empty_srt", "file": info, "queue": []}
+        return {"file": info, "queue": []}
+
+    def select_queue_item(self, path):
+        if self._busy or not any(q["path"] == path for q in self._queue):
+            return {"error": "busy" if self._busy else "file_not_found"}
+        self._file = path
+        return {"file": self._file_info(), "queue": self._queue_info()}
+
+    def remove_queue_item(self, path):
+        if self._busy:
+            return {"error": "busy"}
+        self._queue = [q for q in self._queue if q["path"] != path]
+        if len(self._queue) == 1:
+            return self.set_file(self._queue[0]["path"])
+        if self._file == path:
+            self._file = self._queue[0]["path"] if self._queue else None
+        return {"file": self._file_info() if self._file else None, "queue": self._queue_info()}
+
+    def _queue_info(self):
+        out = []
+        for q in self._queue:
+            final = self._final_path(q["path"])
+            out.append({"path": q["path"], "name": os.path.basename(q["path"]), "status": q["status"],
+                        "error": q["error"], "final": final if os.path.exists(final) else None,
+                        "current": q["path"] == self._file})
+        return out
 
     def refresh_file(self):
         return self._file_info() if self._file else None
@@ -229,6 +342,73 @@ class Api:
         write_env("THINKING_LEVEL", level)
         return self.get_state()
 
+    def _workers(self):
+        try:
+            value = int(read_env().get("PARALLEL_WORKERS", "") or DEFAULT_WORKERS)
+        except ValueError:
+            return DEFAULT_WORKERS
+        return min(max(value, 1), MAX_WORKERS)
+
+    def save_workers(self, workers):
+        try:
+            workers = int(workers)
+        except (TypeError, ValueError):
+            return {"error": "bad_workers"}
+        if not 1 <= workers <= MAX_WORKERS:
+            return {"error": "bad_workers"}
+        write_env("PARALLEL_WORKERS", str(workers))
+        return self.get_state()
+
+    def _auto_glossary(self):
+        return (read_env().get("AUTO_GLOSSARY", "") or "1").strip().lower() in ("1", "true", "yes", "on")
+
+    def save_auto_glossary(self, enabled):
+        write_env("AUTO_GLOSSARY", "1" if enabled else "0")
+        return self.get_state()
+
+    def _instructions(self):
+        try:
+            with open(INSTRUCTIONS_FILE, encoding="utf-8") as f:
+                return f.read().strip()
+        except OSError:
+            return ""
+
+    def save_instructions(self, text):
+        with open(INSTRUCTIONS_FILE, "w", encoding="utf-8") as f:
+            f.write((text or "").strip() + "\n")
+        return self.get_state()
+
+    def _env_flag(self, key, default):
+        value = (read_env().get(key, "") or "").strip().lower()
+        return default if not value else value in ("1", "true", "yes", "on")
+
+    def _source_lang(self):
+        lang = (read_env().get("SOURCE_LANG", "") or "auto").strip()
+        return lang if lang in LANGUAGES else "auto"
+
+    def _target_lang(self):
+        lang = (read_env().get("TARGET_LANG", "") or "he").strip()
+        return lang if lang in LANGUAGES else "he"
+
+    def _naming(self):
+        mode = (read_env().get("OUTPUT_NAMING", "") or "lang").strip()
+        return mode if mode in NAMING_MODES else "lang"
+
+    def save_translation_prefs(self, prefs):
+        source, target = prefs.get("source_lang", "auto"), prefs.get("target_lang", "he")
+        naming = prefs.get("naming", "lang")
+        if (source != "auto" and source not in LANGUAGES) or target not in LANGUAGES or naming not in NAMING_MODES:
+            return {"error": "bad_lang"}
+        if source == target:
+            return {"error": "same_lang"}
+        write_env("SOURCE_LANG", source)
+        write_env("TARGET_LANG", target)
+        write_env("CONVERT_UNITS", "1" if prefs.get("convert_units", True) else "0")
+        write_env("OUTPUT_NAMING", naming)
+        write_env("SUBTITLE_BOM", "1" if prefs.get("bom") else "0")
+        state = self.get_state()
+        return state
+
     def save_ui_prefs(self, lang, theme):
         write_env("UI_LANG", lang)
         write_env("UI_THEME", theme)
@@ -253,28 +433,44 @@ class Api:
             if not self._file:
                 return {"error": "no_file"}
             self._busy = True
+            self._cancel.clear()
+            self._usage_base = {}
+            self._usage_total = {}
 
         def runner():
             stream = LogStream(self._log)
             ok = False
             result = {}
+            cancelled = False
             try:
                 with contextlib.redirect_stdout(stream):
                     result = target(*args) or {}
                     stream.flush()
                 ok = True
+            except Cancelled:
+                stream.flush()
+                cancelled = True
+                self._log("Cancelled. Finished parts are kept - run again to continue.", "warn")
+                result = {"cancelled": True}
             except Exception as e:
                 stream.flush()
                 self._log(str(e), "error")
                 result = {"error_message": str(e)}
             finally:
                 self._busy = False
-                self._send("done", job=name, ok=ok and not result.get("failed"),
-                           result=result, file=self._file_info())
+                self._send("done", job=name, ok=ok and not result.get("failed"), cancelled=cancelled,
+                           result=result, file=self._file_info() if self._file else None,
+                           queue=self._queue_info())
 
         self._send("started", job=name)
         threading.Thread(target=runner, daemon=True).start()
         return {"ok": True}
+
+    def cancel_job(self):
+        if self._busy:
+            self._cancel.set()
+            self._log("Cancelling - waiting for requests in flight to finish...", "warn")
+        return True
 
     def _do_split(self, chunk_size):
         split_dir = self._dirs()["split"]
@@ -285,44 +481,125 @@ class Api:
         self._send("stage", stage="split", status="done")
         return {"parts": parts}
 
+    @staticmethod
+    def _add_usage(a, b):
+        return {k: a.get(k, 0) + b.get(k, 0) for k in ("input", "output", "thinking", "cost", "calls")}
+
+    def _send_usage(self, engine):
+        self._send("usage", **self._add_usage(self._usage_base, engine.usage))
+
+    def _engine(self, api_key):
+        return TranslationEngine(api_key=api_key, model=self._model(), thinking_level=self._thinking(),
+                                 flex=self._flex(), source_lang=self._source_lang(),
+                                 target_lang=self._target_lang(),
+                                 convert_units=self._env_flag("CONVERT_UNITS", True),
+                                 instructions=self._instructions(), cancel_event=self._cancel)
+
     def _do_translate(self, api_key):
         dirs = self._dirs()
         if self._count_srt(dirs["split"]) == 0:
             raise ValueError(f"No split files found in {dirs['split']}. Run the split step first.")
         self._send("stage", stage="translate", status="active")
-        prepare_directory(dirs["merge"], clear=True)
+        # Not cleared: parts translated by an earlier (failed / cancelled) run are reused
+        prepare_directory(dirs["merge"], clear=False)
 
         def progress(current, total, filename):
             self._send("progress", stage="translate", current=current, total=total, filename=filename)
+            self._send_usage(engine)
 
-        ok = translate_directory(dirs["split"], dirs["merge"], api_key=api_key,
-                                 progress_callback=progress, thinking_level=self._thinking(),
-                                 model=self._model(), flex=self._flex())
+        engine = self._engine(api_key)
+        try:
+            if self._auto_glossary():
+                try:
+                    glossary = load_or_build_glossary(engine, parse_srt(self._file), dirs["merge"])
+                    engine.set_glossary(glossary)
+                    sys.stdout.flush()
+                    for line in glossary.splitlines():
+                        self._log(f"  {line}", "dim")
+                except Cancelled:
+                    raise
+                except Exception as e:
+                    print(f"Warning - character / term analysis failed, translating without it: {e}")
+            ok, summary = translate_directory(dirs["split"], dirs["merge"], engine,
+                                              progress_callback=progress, workers=self._workers())
+        finally:
+            self._send_usage(engine)
+            self._usage_total = self._add_usage(self._usage_base, engine.usage)
         if not ok:
             self._send("stage", stage="translate", status="error")
-            raise RuntimeError("Some parts failed translation or validation. See the log above.")
+            raise RuntimeError("Some parts failed translation. Run again to retry only the failed parts.")
         self._log("All parts translated and validated.", "success")
         self._send("stage", stage="translate", status="done")
-        return {}
+        return {"usage": engine.usage, "warnings": summary.get("warnings", [])}
 
     def _do_merge(self):
         dirs = self._dirs()
-        files = [os.path.join(dirs["merge"], f) for f in os.listdir(dirs["merge"])
-                 if f.lower().endswith(".srt")] if os.path.isdir(dirs["merge"]) else []
+        files = list_srt_parts(dirs["merge"])
         if not files:
             raise ValueError(f"No translated files found in {dirs['merge']}. Run the translation step first.")
         self._send("stage", stage="merge", status="active")
         prepare_directory(dirs["output"], clear=False)
         final = self._final_path()
-        count = merge_srt_files(files, final)
-        self._log(f"Merged {len(files)} files ({count} blocks) -> {final}", "success")
+        count = merge_srt_files(files, final, rtl_fix=self._target_lang() in RTL_LANGUAGES,
+                                bom=self._env_flag("SUBTITLE_BOM", False))
+        ok, reason = compare_structure(parse_srt(self._file), parse_srt(final))
+        if ok:
+            self._log(f"Merged {len(files)} files ({count} blocks) -> {final}", "success")
+            self._log("Final check passed: every block and timestamp matches the source file.", "success")
+        else:
+            self._log(f"Merged {len(files)} files ({count} blocks) -> {final}")
+            self._log(f"Warning - the merged file doesn't match the source: {reason}", "warn")
+        self._run_qa(final)
         self._send("stage", stage="merge", status="done")
         return {"final": final}
 
+    def _run_qa(self, final):
+        issues = qa.check(parse_srt(self._file), parse_srt(final), self._target_lang(), looks_translated)
+        counts = qa.summarize(issues)
+        if issues:
+            parts = ", ".join(f"{n} {kind}" for kind, n in counts.items())
+            self._log(f"Quality check: {len(issues)} issue(s) - {parts}.", "warn")
+        else:
+            self._log("Quality check: no issues found.", "success")
+        fixable = sum(1 for i in issues if i["kind"] in qa.FIXABLE)
+        self._send("qa", counts=counts, issues=issues[:200], total=len(issues), fixable=fixable)
+        return issues
+
+    def _do_fix(self, api_key):
+        final = self._final_path()
+        if not os.path.exists(final):
+            raise ValueError("No translated file yet. Run the pipeline first.")
+        issues = qa.check(parse_srt(self._file), parse_srt(final), self._target_lang(), looks_translated)
+        fixable = [i for i in issues if i["kind"] in qa.FIXABLE]
+        if not fixable:
+            self._log("Nothing to fix automatically.", "success")
+            return {}
+        print(f"Re-translating {len({i['index'] for i in fixable})} block(s) flagged by the quality check...")
+        engine = self._engine(api_key)
+        glossary_path = os.path.join(self._dirs()["merge"], "glossary.txt")
+        if self._auto_glossary() and os.path.exists(glossary_path):
+            with open(glossary_path, encoding="utf-8") as f:
+                engine.set_glossary(f.read().partition("\n")[2].strip())
+        try:
+            replaced = qa.fix_issues(engine, self._file, final, fixable,
+                                     rtl_fix=self._target_lang() in RTL_LANGUAGES,
+                                     bom=self._env_flag("SUBTITLE_BOM", False))
+        finally:
+            self._send("usage", **engine.usage)
+        self._log(f"Replaced {replaced} block(s) in {final}", "success")
+        self._run_qa(final)
+        return {"final": final}
+
+    def run_fix(self):
+        key = self._api_key()
+        if not key:
+            return {"error": "no_key"}
+        return self._start_job("fix", self._do_fix, key)
+
     def _do_pipeline(self, chunk_size, api_key):
         self._do_split(chunk_size)
-        self._do_translate(api_key)
-        return self._do_merge()
+        result = self._do_translate(api_key)
+        return {**result, **self._do_merge()}
 
     def _saved_chunk(self):
         try:
@@ -343,6 +620,45 @@ class Api:
             write_env("CHUNK_SIZE", str(chunk_size))
         return chunk_size
 
+    def _do_batch(self, chunk_size, api_key):
+        total = len(self._queue)
+        for q in self._queue:
+            if q["status"] != "done":
+                q["status"], q["error"] = "pending", ""
+        for i, q in enumerate(self._queue):
+            if self._cancel.is_set():
+                raise Cancelled()
+            if q["status"] == "done" and os.path.exists(self._final_path(q["path"])):
+                continue
+            self._file = q["path"]
+            q["status"] = "running"
+            self._send("batch", current=i + 1, total=total, name=os.path.basename(q["path"]),
+                       file=self._file_info(), queue=self._queue_info())
+            self._log(f"[{i + 1}/{total}] {os.path.basename(q['path'])}", "head")
+            try:
+                self._do_pipeline(chunk_size, api_key)
+                q["status"] = "done"
+            except Cancelled:
+                q["status"] = "pending"
+                raise
+            except Exception as e:
+                sys.stdout.flush()
+                q["status"], q["error"] = "failed", str(e)
+                self._log(f"{os.path.basename(q['path'])}: {e}", "error")
+            finally:
+                self._usage_base = self._usage_total or self._usage_base
+                self._send("queue", queue=self._queue_info())
+        done = sum(q["status"] == "done" for q in self._queue)
+        failed = [os.path.basename(q["path"]) for q in self._queue if q["status"] == "failed"]
+        u = self._usage_base
+        if u:
+            self._log(f"Batch total: {u.get('calls', 0)} call(s), ${u.get('cost', 0):.4f}")
+        if failed:
+            self._log(f"{done}/{total} files translated. Failed: {', '.join(failed)} - run again to retry them.", "error")
+            return {"failed": failed}
+        self._log(f"All {total} files translated.", "success")
+        return {"batch": total}
+
     def run_pipeline(self, chunk_size):
         chunk = self._check_chunk(chunk_size)
         if not chunk:
@@ -350,6 +666,8 @@ class Api:
         key = self._api_key()
         if not key:
             return {"error": "no_key"}
+        if len(self._queue) > 1:
+            return self._start_job("batch", self._do_batch, chunk, key)
         return self._start_job("pipeline", self._do_pipeline, chunk, key)
 
     def run_split(self, chunk_size):
@@ -371,7 +689,7 @@ class Api:
 def main():
     api = Api()
     window = webview.create_window(
-        "AI SRT Translator",
+        APP_NAME,
         url=os.path.join(WEB_DIR, "index.html"),
         js_api=api,
         width=1100,
@@ -388,8 +706,8 @@ def main():
 
             def on_drop(e):
                 files = (e.get("dataTransfer") or {}).get("files") or []
-                path = files[0].get("pywebviewFullPath") if files else None
-                result = api.set_file(path) if path else {"error": "file_not_found"}
+                paths = [f.get("pywebviewFullPath") for f in files if f.get("pywebviewFullPath")]
+                result = api.set_files(paths) if paths else {"error": "file_not_found"}
                 api._send("file_dropped", result=result)
 
             window.dom.document.events.dragenter += DOMEventHandler(lambda e: None, True, True)
