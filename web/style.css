@@ -1,6 +1,6 @@
 :root {
   --font: "Heebo", "Segoe UI", -apple-system, BlinkMacSystemFont, "Arial Hebrew", system-ui, "Noto Sans Hebrew", "Noto Sans", sans-serif;
-  --mono: "JetBrains Mono", "Cascadia Mono", Consolas, "SF Mono", Menlo, "DejaVu Sans Mono", monospace;
+  --mono: "JetBrains Mono", "Cascadia Mono", Consolas, "SF Mono", Menlo, "DejaVu Sans Mono", "Heebo", "Arial Hebrew", monospace;
   --radius: 14px;
   --radius-sm: 10px;
   --accent: #7c5cff;
