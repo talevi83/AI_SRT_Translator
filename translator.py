@@ -1,9 +1,24 @@
+"""
+Gemini subtitle translation.
+
+Only the subtitle *text* is sent to the model, as JSON ({"id", "text"} items); indices and
+timestamps never leave this machine, so the model can't break them and we don't pay output
+tokens for them. Each part is translated with a little context from its neighbours, missing
+or untranslated items are retried individually, and finished parts are reused on the next run.
+"""
+import hashlib
+import json
 import os
+import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from google import genai
 from google.genai import types
+from pydantic import BaseModel
 
-from srt_utils import parse_srt_text, validate_translation
+from srt_utils import SRTBlock, list_srt_parts, parse_srt, validate_translation, write_srt
 
 # Text models offered in Settings. Prices: USD per 1M tokens (paid tier, standard),
 # from https://ai.google.dev/gemini-api/docs/pricing - thinking tokens are billed as output.
@@ -13,198 +28,396 @@ MODELS = {
     "gemini-3.1-flash-lite": {"input": 0.25, "output": 1.50},
 }
 DEFAULT_MODEL = "gemini-3.8-flash"
-MODEL = DEFAULT_MODEL  # kept for backwards compatibility
 THINKING_LEVELS = ("low", "medium", "high")
 
-# Models that rejected the thinking_level setting during this run
-_NO_THINKING_LEVEL = set()
+# Languages offered in the UI (code -> English name used in the prompt)
+LANGUAGES = {
+    "he": "Hebrew", "en": "English", "ar": "Arabic", "ru": "Russian", "es": "Spanish",
+    "fr": "French", "de": "German", "it": "Italian", "pt": "Portuguese", "nl": "Dutch",
+    "pl": "Polish", "tr": "Turkish", "uk": "Ukrainian", "el": "Greek", "ja": "Japanese",
+    "ko": "Korean", "zh": "Chinese (Simplified)", "hi": "Hindi", "fa": "Persian",
+}
+RTL_LANGUAGES = {"he", "ar", "fa"}
+
+# Letters of the target script: a translated item with none of these is treated as untranslated
+TARGET_SCRIPT = {
+    "he": r"[א-ת]", "ar": r"[ؠ-ي]", "fa": r"[ؠ-يپ-ی]",
+    "ru": r"[Ѐ-ӿ]", "uk": r"[Ѐ-ӿ]", "el": r"[Ͱ-Ͽ]",
+    "ja": r"[぀-ヿ一-鿿]", "zh": r"[一-鿿]", "ko": r"[가-힯]",
+    "hi": r"[ऀ-ॿ]",
+}
+_LATIN_WORD = re.compile(r"[A-Za-z]{2,}")
+
+# Retry policy
+MAX_ATTEMPTS = 3                   # model attempts per part (missing items only after the first)
+RATE_LIMIT_BACKOFF = (10, 20, 40, 60, 90)  # seconds, for 429 / 503 on the standard tier
+ERROR_DELAY = 5
 
 # Flex inference (preview): 50% cheaper, best-effort capacity, can queue for minutes.
 # https://ai.google.dev/gemini-api/docs/flex-inference
 FLEX_TIMEOUT_MS = 900_000          # recommended client timeout (15 min)
 FLEX_BUSY_RETRIES = 3              # 429/503 retries before falling back to standard
 FLEX_BACKOFF = (15, 30, 60)        # seconds
-_FLEX_UNSUPPORTED = False          # set if the installed SDK doesn't know service_tier
+
+CONTEXT_BEFORE = 4                 # source lines from the previous part sent as context
+CONTEXT_AFTER = 2                  # source lines from the next part sent as context
+MANIFEST = ".translation.json"     # remembers the options a translated folder was made with
+
+
+class Cancelled(Exception):
+    pass
+
+
+class Item(BaseModel):
+    id: str
+    text: str
 
 
 def _is_capacity_error(e):
     msg = str(e).lower()
-    return any(k in msg for k in ("503", "429", "unavailable", "resource_exhausted", "overloaded"))
+    return any(k in msg for k in ("503", "429", "unavailable", "resource_exhausted", "overloaded", "rate limit"))
 
 
-def build_config(system_prompt, thinking_level=None, flex=False):
-    """Generation config; thinking_level controls how much the model 'thinks' (and costs)."""
-    global _FLEX_UNSUPPORTED
-    kwargs = dict(system_instruction=system_prompt, temperature=0.2)
-    if thinking_level in THINKING_LEVELS:
-        try:
-            kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=thinking_level)
-        except Exception as e:  # older google-genai without thinking_level support
-            print(f"Thinking level not supported by this SDK version, using model default ({e})")
-    if flex and not _FLEX_UNSUPPORTED:
-        try:
-            return types.GenerateContentConfig(service_tier="flex", **kwargs)
-        except Exception as e:  # older google-genai without service_tier
-            _FLEX_UNSUPPORTED = True
-            print(f"Flex is not supported by this google-genai version - using standard tier. "
-                  f"Run 'pip install -U google-genai' to enable it. ({e})")
-    return types.GenerateContentConfig(**kwargs)
+def build_system_prompt(source_lang="auto", target_lang="he", convert_units=True, glossary="", instructions=""):
+    target = LANGUAGES.get(target_lang, target_lang)
+    source = "the source language (detect it)" if source_lang in ("", "auto") else LANGUAGES.get(source_lang, source_lang)
+    rules = [
+        f"You are a professional film and TV subtitle translator. Translate subtitles from {source} into {target}.",
+        "",
+        "Input: a JSON object. \"subtitles\" is a list of {\"id\", \"text\"} items to translate. "
+        "\"context_before\" / \"context_after\", when present, are neighbouring subtitle lines given ONLY "
+        "for context - never translate or return them.",
+        "",
+        "Rules:",
+        "- Return a JSON list with exactly one {\"id\", \"text\"} item for every input item, with the same ids "
+        "in the same order. Never merge, split, skip, reorder or add items, even if a sentence continues "
+        "across items.",
+        f"- Write natural, idiomatic {target} as it is actually spoken, matching each character's tone and register. "
+        "Keep it concise - subtitles must be readable at a glance.",
+        "- Keep the line structure: at most 2 lines per item, breaking lines where the source does.",
+        "- Keep formatting tags such as <i>, </i>, <b>, <font ...> and {\\an8} exactly, around the matching words. "
+        "Keep music notes (♪) and other symbols.",
+        "- Translate sound and speaker labels in brackets, e.g. [laughs], too.",
+        "- Keep character and place names consistent throughout; transliterate them rather than translating them.",
+        "- Infer gender (speaker and addressee), formality and who is talking from the context, and use the "
+        "correct grammatical forms.",
+    ]
+    if convert_units:
+        rules.append("- Convert imperial units to metric (miles -> km, pounds -> kg, feet -> meters, "
+                     "Fahrenheit -> Celsius, etc.), rounding to natural values.")
+    if target_lang == "he":
+        rules.append("- Use modern spoken Israeli Hebrew, without niqqud.")
+    if glossary.strip():
+        rules += ["", "Glossary and character notes - follow them exactly:", glossary.strip()]
+    if instructions.strip():
+        rules += ["", "Additional instructions from the user:", instructions.strip()]
+    return "\n".join(rules)
 
 
-def log_usage(response):
-    usage = getattr(response, "usage_metadata", None)
-    if not usage:
-        return
-    prompt = getattr(usage, "prompt_token_count", None) or 0
-    output = getattr(usage, "candidates_token_count", None) or 0
-    thoughts = getattr(usage, "thoughts_token_count", None) or 0
-    print(f"Tokens - input: {prompt:,} | output: {output:,} | thinking: {thoughts:,}")
+def needs_translation(text):
+    return bool(_LATIN_WORD.search(text))
 
-def translate_file(client, file_path, output_path, retries=3, delay=5, thinking_level=None, model=DEFAULT_MODEL,
-                   flex=False, standard_client=None):
-    """
-    Reads an SRT file, translates its content using Gemini API,
-    and writes the translated content to the output path.
-    Includes basic retry logic for network or API errors.
-    """
-    system_prompt = (
-        "תרגם רק את המשפטים הכתובים באנגלית לעברית, "
-        "המר כל מידה או משקל לשיטה המטרית (ק\"מ, ק\"ג, צלזיוס וכו'), "
-        "ושמור במדויק על הפורמט, מספרי האינדקס וחותמות הזמן המקוריות. "
-        "החזר רק את קובץ ה-SRT התקין ללא שום טקסט מקדים, הסבר או Markdown מיותר."
-    )
 
-    try:
-        with open(file_path, 'r', encoding='utf-8-sig') as f:
-            content = f.read()
-    except Exception as e:
-        print(f"Failed to read {file_path}: {e}")
-        return False
+def looks_translated(source, translated, target_lang):
+    """False if the item clearly wasn't translated into the target script."""
+    pattern = TARGET_SCRIPT.get(target_lang)
+    if not pattern or not needs_translation(source):
+        return True
+    return re.search(pattern, translated) is not None
 
-    original_blocks = parse_srt_text(content)
-    if not original_blocks:
-        print(f"No valid SRT blocks found in {os.path.basename(file_path)}.")
-        return False
 
-    attempt = 0
-    use_flex = flex
-    busy = 0
-    while attempt < retries:
-        attempt += 1
-        level = None if model in _NO_THINKING_LEVEL else thinking_level
-        try:
-            chat = (client if use_flex else (standard_client or client)).chats.create(
-                model=model,
-                config=build_config(system_prompt, level, flex=use_flex),
-            )
-            response = chat.send_message(content)
-            log_usage(response)
-            
-            # Clean up potential markdown formatting returned by the model
-            translated_text = response.text
-            if translated_text.startswith("```srt"):
-                translated_text = translated_text[6:]
-            elif translated_text.startswith("```"):
-                translated_text = translated_text[3:]
-            if translated_text.endswith("```"):
-                translated_text = translated_text[:-3]
-            
-            translated_text = translated_text.strip() + "\n\n"
+class TranslationEngine:
+    """Holds the Gemini clients, options, usage totals and the cancel flag for one run."""
 
-            # Verify the model kept every block, index and timestamp intact
-            is_valid, reason = validate_translation(original_blocks, parse_srt_text(translated_text))
-            if not is_valid:
-                raise ValueError(f"Validation failed - {reason}")
-
-            with open(output_path, 'w', encoding='utf-8') as f:
-                f.write(translated_text)
-            
-            print(f"Successfully translated: {os.path.basename(file_path)}")
-            return True
-
-        except Exception as e:
-            # Some models don't accept thinking_level - drop it and retry without using up an attempt
-            if level and "thinking" in str(e).lower():
-                _NO_THINKING_LEVEL.add(model)
-                print(f"{model} doesn't support thinking level '{level}' - using the model default.")
-                attempt -= 1
-                continue
-            # Flex capacity is best-effort: back off, then fall back to the standard tier
-            if use_flex and _is_capacity_error(e):
-                attempt -= 1
-                if busy < FLEX_BUSY_RETRIES:
-                    wait = FLEX_BACKOFF[min(busy, len(FLEX_BACKOFF) - 1)]
-                    busy += 1
-                    print(f"Flex is busy ({e}). Waiting {wait}s (flex retry {busy}/{FLEX_BUSY_RETRIES})...")
-                    time.sleep(wait)
-                else:
-                    use_flex = False
-                    print("Flex unavailable - falling back to standard tier for this part (full price).")
-                continue
-            print(f"Attempt {attempt}/{retries} failed for {os.path.basename(file_path)}: {e}")
-            if attempt < retries:
-                print(f"Retrying in {delay} seconds...")
-                time.sleep(delay)
-            else:
-                print(f"Max retries reached. Skipping {os.path.basename(file_path)}.")
-                return False
-
-def translate_directory(input_dir, output_dir, api_key=None, progress_callback=None, thinking_level=None,
-                        model=DEFAULT_MODEL, flex=False):
-    """
-    Iterates over all SRT files in the input directory,
-    translates each, and saves it to the output directory.
-    Designed to be modular for a pipeline or GUI.
-    """
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-    # Initialize client. Requires GEMINI_API_KEY environment variable or direct api_key.
-    try:
+    def __init__(self, api_key=None, model=DEFAULT_MODEL, thinking_level=None, flex=False,
+                 source_lang="auto", target_lang="he", convert_units=True, glossary="", instructions="",
+                 cancel_event=None):
         key = {"api_key": api_key} if api_key else {}
-        standard_client = genai.Client(**key)
+        self.standard_client = genai.Client(**key)
         # Flex requests can sit in a queue for minutes - use a long client timeout
-        client = genai.Client(http_options={"timeout": FLEX_TIMEOUT_MS}, **key) if flex else standard_client
-    except Exception as e:
-        print(f"Error initializing Gemini Client: {e}")
-        print("Please ensure the GEMINI_API_KEY environment variable is set or passed directly.")
-        return False
+        self.flex_client = genai.Client(http_options={"timeout": FLEX_TIMEOUT_MS}, **key) if flex else None
+        self.model = model if model in MODELS else DEFAULT_MODEL
+        self.thinking_level = thinking_level if thinking_level in THINKING_LEVELS else None
+        self.flex = flex
+        self.source_lang = source_lang or "auto"
+        self.target_lang = target_lang or "he"
+        self.convert_units = convert_units
+        self.glossary = glossary or ""
+        self.instructions = instructions or ""
+        self.system_prompt = build_system_prompt(self.source_lang, self.target_lang, convert_units,
+                                                 self.glossary, self.instructions)
+        self.cancel_event = cancel_event or threading.Event()
+        self._lock = threading.Lock()
+        self._no_thinking_level = False
+        self._flex_unsupported = False
+        self.usage = {"input": 0, "output": 0, "thinking": 0, "cost": 0.0, "calls": 0}
 
-    files = [f for f in os.listdir(input_dir) if f.lower().endswith('.srt')]
-    if not files:
+    # ---------- helpers ----------
+    def signature(self):
+        """Options that change the translation itself - a folder made with other options is not reused."""
+        raw = json.dumps([self.source_lang, self.target_lang, self.convert_units,
+                          self.glossary.strip(), self.instructions.strip()], ensure_ascii=False)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+    def sleep(self, seconds):
+        if self.cancel_event.wait(seconds):
+            raise Cancelled()
+
+    def check_cancel(self):
+        if self.cancel_event.is_set():
+            raise Cancelled()
+
+    def _config(self, use_flex, json_schema=True, system_prompt=None):
+        kwargs = dict(system_instruction=system_prompt or self.system_prompt, temperature=0.2)
+        if json_schema:
+            kwargs.update(response_mime_type="application/json", response_schema=list[Item])
+        if self.thinking_level and not self._no_thinking_level:
+            kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=self.thinking_level)
+        if use_flex and not self._flex_unsupported:
+            try:
+                return types.GenerateContentConfig(service_tier="flex", **kwargs)
+            except Exception as e:  # older google-genai without service_tier
+                self._flex_unsupported = True
+                print(f"Flex is not supported by this google-genai version - using standard tier. "
+                      f"Run 'pip install -U google-genai' to enable it. ({e})")
+        return types.GenerateContentConfig(**kwargs)
+
+    def _record_usage(self, response, flex_used):
+        usage = getattr(response, "usage_metadata", None)
+        if not usage:
+            return
+        prompt = usage.prompt_token_count or 0
+        output = usage.candidates_token_count or 0
+        thoughts = usage.thoughts_token_count or 0
+        price = MODELS[self.model]
+        cost = (prompt * price["input"] + (output + thoughts) * price["output"]) / 1e6
+        if flex_used:
+            cost *= 0.5
+        with self._lock:
+            u = self.usage
+            u["input"] += prompt
+            u["output"] += output
+            u["thinking"] += thoughts
+            u["cost"] += cost
+            u["calls"] += 1
+
+    def generate(self, contents, label, json_schema=True, system_prompt=None):
+        """One model call with thinking / flex / rate-limit handling. Other errors are raised."""
+        use_flex = self.flex
+        flex_busy = 0
+        limited = 0
+        while True:
+            self.check_cancel()
+            client = self.flex_client if use_flex and self.flex_client else self.standard_client
+            flex_used = use_flex and self.flex_client is not None and not self._flex_unsupported
+            try:
+                response = client.models.generate_content(
+                    model=self.model, contents=contents,
+                    config=self._config(use_flex, json_schema, system_prompt))
+                self._record_usage(response, flex_used)
+                return response
+            except Cancelled:
+                raise
+            except Exception as e:
+                msg = str(e).lower()
+                # Some models don't accept thinking_level - drop it and retry
+                if self.thinking_level and not self._no_thinking_level and "thinking" in msg:
+                    self._no_thinking_level = True
+                    print(f"{self.model} doesn't support thinking level '{self.thinking_level}' - using the model default.")
+                    continue
+                if not _is_capacity_error(e):
+                    raise
+                # Flex capacity is best-effort: back off, then fall back to the standard tier
+                if use_flex:
+                    if flex_busy < FLEX_BUSY_RETRIES:
+                        wait = FLEX_BACKOFF[min(flex_busy, len(FLEX_BACKOFF) - 1)]
+                        flex_busy += 1
+                        print(f"Flex is busy for {label}. Waiting {wait}s (flex retry {flex_busy}/{FLEX_BUSY_RETRIES})...")
+                        self.sleep(wait)
+                    else:
+                        use_flex = False
+                        print(f"Flex unavailable - falling back to standard tier for {label} (full price).")
+                    continue
+                if limited >= len(RATE_LIMIT_BACKOFF):
+                    raise
+                wait = RATE_LIMIT_BACKOFF[limited]
+                limited += 1
+                print(f"Rate limited on {label}. Waiting {wait}s (retry {limited}/{len(RATE_LIMIT_BACKOFF)})...")
+                self.sleep(wait)
+
+    # ---------- translation ----------
+    def _request(self, items, before, after, label):
+        """items: list of (id, SRTBlock). Returns {id: translated text}."""
+        payload = {"subtitles": [{"id": key, "text": b.text} for key, b in items]}
+        if before:
+            payload["context_before"] = [b.text for b in before]
+        if after:
+            payload["context_after"] = [b.text for b in after]
+        response = self.generate(json.dumps(payload, ensure_ascii=False), label)
+        parsed = getattr(response, "parsed", None)
+        if parsed is None:
+            text = (response.text or "").strip()
+            text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text)
+            parsed = [Item(**x) for x in json.loads(text)]
+        return {str(x.id).strip(): x.text for x in parsed}
+
+    def translate_blocks(self, blocks, before=(), after=(), label="part"):
+        """
+        Translate a list of SRTBlocks. Returns (translated blocks, list of warnings).
+        Raises if some items are still missing after all attempts.
+        """
+        # Ids are positions, not SRT indices - broken files can repeat an index
+        todo = [(str(i + 1), b) for i, b in enumerate(blocks) if b.text.strip()]
+        result = {}
+        suspicious = {}
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            pending = [(k, b) for k, b in todo if k not in result]
+            if not pending:
+                break
+            self.check_cancel()
+            try:
+                answer = self._request(pending, before, after, label)
+            except Cancelled:
+                raise
+            except Exception as e:
+                print(f"Attempt {attempt}/{MAX_ATTEMPTS} failed for {label}: {e}")
+                if attempt < MAX_ATTEMPTS:
+                    self.sleep(ERROR_DELAY)
+                continue
+            retry = []
+            for k, b in pending:
+                text = (answer.get(k) or "").strip()
+                if not text:
+                    retry.append(b.index)
+                elif not looks_translated(b.text, text, self.target_lang) and attempt < MAX_ATTEMPTS:
+                    suspicious[k] = text  # retry it; keep this answer as a fallback
+                    retry.append(b.index)
+                else:
+                    result[k] = text
+                    suspicious.pop(k, None)
+            if retry:
+                shown = ", ".join(retry[:10]) + (" ..." if len(retry) > 10 else "")
+                print(f"{label}: {len(retry)} item(s) missing or untranslated ({shown}) - "
+                      f"{'retrying just those' if attempt < MAX_ATTEMPTS else 'giving up'}.")
+
+        warnings = []
+        for k, b in todo:
+            if k not in result and k in suspicious:
+                result[k] = suspicious[k]
+                warnings.append(f"Block {b.index} may be untranslated.")
+        missing = [b.index for k, b in todo if k not in result]
+        if missing:
+            raise RuntimeError(f"{label}: no translation for block(s) {', '.join(missing[:10])}"
+                               f"{' ...' if len(missing) > 10 else ''} after {MAX_ATTEMPTS} attempts.")
+        keys = {id(b): k for k, b in todo}
+        out = [SRTBlock(b.index, b.timestamp, result[keys[id(b)]] if id(b) in keys else b.text) for b in blocks]
+        return out, warnings
+
+
+# ---------- folder pipeline ----------
+def _read_manifest(output_dir):
+    try:
+        with open(os.path.join(output_dir, MANIFEST), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_manifest(output_dir, signature):
+    with open(os.path.join(output_dir, MANIFEST), "w", encoding="utf-8") as f:
+        json.dump({"signature": signature}, f)
+
+
+def is_part_done(src_path, out_path):
+    """A translated part can be reused if it exists and matches its source part block-for-block."""
+    if not os.path.exists(out_path):
+        return False
+    return validate_translation(parse_srt(src_path), parse_srt(out_path))[0]
+
+
+def translate_directory(input_dir, output_dir, engine, progress_callback=None, workers=3, resume=True):
+    """
+    Translate every SRT part in input_dir into output_dir, in parallel.
+    Parts already translated with the same options are skipped (resume).
+    Returns (ok, summary dict).
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    parts = list_srt_parts(input_dir)
+    if not parts:
         print(f"No SRT files found in {input_dir}")
-        return False
+        return False, {}
 
-    print(f"Found {len(files)} files to translate. Model: {model}, thinking: {thinking_level or 'model default'}, tier: {'flex' if flex else 'standard'}")
+    signature = engine.signature()
+    if resume and _read_manifest(output_dir).get("signature") not in (None, signature):
+        print("Translation options changed since the last run - translating all parts again.")
+        resume = False
+    # Drop translated parts that don't belong to the current split (e.g. the chunk size changed)
+    names = {os.path.basename(p) for p in parts}
+    for f in os.listdir(output_dir):
+        if f.lower().endswith(".srt") and (not resume or f not in names):
+            os.remove(os.path.join(output_dir, f))
+    _write_manifest(output_dir, signature)
 
-    success_count = 0
-    for idx, file_name in enumerate(files):
-        input_file = os.path.join(input_dir, file_name)
-        output_file = os.path.join(output_dir, file_name)
-        
-        print(f"Processing: {file_name}")
-        if translate_file(client, input_file, output_file, thinking_level=thinking_level, model=model,
-                          flex=flex, standard_client=standard_client):
-            success_count += 1
-            
-        if progress_callback:
-            progress_callback(idx + 1, len(files), file_name)
-            
-    print(f"Translation complete. Successfully translated {success_count}/{len(files)} files.")
-    if success_count != len(files):
-        print(f"{len(files) - success_count} file(s) failed translation or validation.")
-        return False
-    return True
+    blocks = [parse_srt(p) for p in parts]
+    jobs, done = [], 0
+    for i, path in enumerate(parts):
+        out = os.path.join(output_dir, os.path.basename(path))
+        if resume and is_part_done(path, out):
+            done += 1
+            continue
+        before = blocks[i - 1][-CONTEXT_BEFORE:] if i > 0 else []
+        after = blocks[i + 1][:CONTEXT_AFTER] if i + 1 < len(parts) else []
+        jobs.append((path, out, blocks[i], before, after))
 
-if __name__ == "__main__":
-    # Example execution that can be chained in a pipeline
-    INPUT_FOLDER = "split_files"
-    OUTPUT_FOLDER = "translated_files"
-    
-    # Ensures the function is called properly if run as a standalone script
-    if os.path.exists(INPUT_FOLDER):
-        success = translate_directory(INPUT_FOLDER, OUTPUT_FOLDER)
-        if success:
-            print("Ready for the Merge step. Call your merge function here.")
-    else:
-        print(f"Example input directory '{INPUT_FOLDER}' does not exist.")
+    total = len(parts)
+    print(f"{total} part(s): {done} already translated, {len(jobs)} to translate. "
+          f"Model: {engine.model}, thinking: {engine.thinking_level or 'model default'}, "
+          f"tier: {'flex' if engine.flex else 'standard'}, "
+          f"{LANGUAGES.get(engine.source_lang, 'auto')} -> {LANGUAGES.get(engine.target_lang, engine.target_lang)}")
+    if done and progress_callback:
+        progress_callback(done, total, "")
+
+    failed, warnings = [], []
+
+    def work(job):
+        path, out, part_blocks, before, after = job
+        name = os.path.basename(path)
+        translated, warns = engine.translate_blocks(part_blocks, before, after, label=name)
+        write_srt(translated, out)
+        return name, warns
+
+    with ThreadPoolExecutor(max_workers=max(1, int(workers))) as pool:
+        futures = {pool.submit(work, job): job for job in jobs}
+        try:
+            for future in as_completed(futures):
+                name = os.path.basename(futures[future][0])
+                try:
+                    _, warns = future.result()
+                    warnings += [f"{name}: {w}" for w in warns]
+                    print(f"Translated: {name}")
+                except Cancelled:
+                    continue
+                except Exception as e:
+                    failed.append(name)
+                    print(f"Failed: {name} - {e}")
+                done += 1
+                if progress_callback:
+                    progress_callback(done, total, name)
+        finally:
+            if engine.cancel_event.is_set():
+                for f in futures:
+                    f.cancel()
+
+    if engine.cancel_event.is_set():
+        raise Cancelled()
+
+    for w in warnings:
+        print(f"Warning - {w}")
+    u = engine.usage
+    print(f"Tokens - input: {u['input']:,} | output: {u['output']:,} | thinking: {u['thinking']:,} "
+          f"| cost: ${u['cost']:.4f} ({u['calls']} call(s))")
+    if failed:
+        print(f"{len(failed)} part(s) failed: {', '.join(failed)}. Run again to retry just those.")
+        return False, {"failed": failed, "warnings": warnings}
+    print(f"Translation complete: {total}/{total} parts.")
+    return True, {"failed": [], "warnings": warnings}

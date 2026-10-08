@@ -120,7 +120,8 @@
   $$(".stepper").forEach(st => {
     const input = $("input", st);
     $$("button", st).forEach(b => b.addEventListener("click", () => {
-      const v = Math.max(1, (parseInt(input.value, 10) || 0) + parseInt(b.dataset.step, 10));
+      const max = parseInt(input.max, 10) || Infinity;
+      const v = Math.min(max, Math.max(1, (parseInt(input.value, 10) || 0) + parseInt(b.dataset.step, 10)));
       input.value = v; input.dispatchEvent(new Event("input"));
     }));
   });
@@ -149,7 +150,7 @@
     $(".log-empty", box)?.remove();
     const line = document.createElement("div");
     let lvl = level;
-    if (lvl === "info" && /^(attempt \d|retrying|flex |.* doesn't support thinking)/i.test(msg)) lvl = "warn";
+    if (lvl === "info" && /^(attempt \d|retrying|flex |rate limited|warning|cancel|translation options changed)|doesn't support thinking|missing or untranslated|falling back/i.test(msg)) lvl = "warn";
     else if (lvl === "info" && /fail|error|mismatch|skipping|aborted/i.test(msg)) lvl = "error";
     if (lvl === "info" && /success|complete/i.test(msg)) lvl = "success";
     line.className = "log-line " + lvl;
@@ -179,6 +180,15 @@
   $("#run-split").addEventListener("click", () => startJob("run_split", $("#chunk-split").value));
   $("#run-translate").addEventListener("click", () => startJob("run_translate"));
   $("#run-merge").addEventListener("click", () => startJob("run_merge"));
+  $$(".cancel-btn").forEach(b => b.addEventListener("click", () => api && api.cancel_job()));
+
+  function renderUsage(u) {
+    const chip = $("#usage-chip");
+    if (!u || !u.calls) { chip.classList.add("hidden"); return; }
+    const tokens = (u.input + u.output + u.thinking).toLocaleString("en-US");
+    chip.textContent = t("usage_line", { cost: "$" + u.cost.toFixed(u.cost < 0.1 ? 4 : 2), tokens });
+    chip.classList.remove("hidden");
+  }
 
   window.onPyEvent = (e) => {
     switch (e.event) {
@@ -188,6 +198,7 @@
         $("#result").classList.add("hidden");
         if (e.job === "pipeline") resetStages();
         if (e.job === "translate") { $("#trans-progress").style.width = "0%"; $("#trans-status").textContent = ""; }
+        renderUsage(null);
         log(`▶ ${e.job}`, "head");
         break;
       case "log":
@@ -201,10 +212,13 @@
           if (e.stage === "merge" && e.status === "done") setProgress(1);
         }
         break;
+      case "usage":
+        renderUsage(e);
+        break;
       case "progress": {
         const txt = t("st_progress", { c: e.current, t: e.total });
         $("#st-translate-sub").textContent = txt;
-        $("#trans-status").textContent = `${txt} · ${e.filename}`;
+        $("#trans-status").textContent = e.filename ? `${txt} · ${e.filename}` : txt;
         $("#trans-progress").style.width = (e.current / e.total) * 100 + "%";
         if (state.job === "pipeline") setProgress(0.1 + 0.8 * (e.current / e.total));
         break;
@@ -214,7 +228,8 @@
         if (e.file) state.file = e.file;
         if (e.result && e.result.parts) $("#st-split-sub").textContent = t("st_parts", { n: e.result.parts });
         renderFile();
-        toast(e.ok ? t("job_done") : t("job_failed"), e.ok ? "success" : "error");
+        if (e.cancelled) toast(t("cancelled"), "warn");
+        else toast(e.ok ? t("job_done") : t("job_failed"), e.ok ? "success" : "error");
         if (!e.ok) $$(".stage").forEach(s => { if (s.dataset.status === "active") setStage(s.dataset.stage, "error"); });
         state.job = null;
         break;
@@ -245,10 +260,12 @@
     renderThinking(s.thinking);
     state.models = s.models || []; state.model = s.model; state.thinking = s.thinking; state.flex = !!s.flex;
     $("#flex-toggle").checked = state.flex;
+    if (s.workers) $("#workers").value = s.workers;
     renderModels();
   }
   // rough token estimate for a ~42 min episode (see README)
-  const EP_IN = 20000, EP_OUT = 35000;
+  // Only subtitle text goes to the model, so output is mostly the translated text itself
+  const EP_IN = 20000, EP_OUT = 20000;
   const prettyModel = id => id.replace(/^gemini-/, "Gemini ").replace(/-flash-lite$/, " Flash-Lite").replace(/-flash$/, " Flash");
   function renderModels() {
     const box = $("#model-choice");
@@ -301,6 +318,16 @@
     if (!api) return;
     const res = await api.save_flex(e.target.checked);
     applyState(res); toast(t(res.flex ? "flex_on" : "flex_off"), "success");
+  });
+  let workersTimer = null;
+  $("#workers").addEventListener("input", () => {
+    clearTimeout(workersTimer);
+    workersTimer = setTimeout(async () => {
+      if (!api) return;
+      const res = await api.save_workers($("#workers").value);
+      if (handleError(res)) return;
+      applyState(res); toast(t("saved"), "success");
+    }, 600);
   });
   $("#model-chip").addEventListener("click", () => go("settings"));
   $("#get-key-link").addEventListener("click", e => { e.preventDefault(); go("help"); });

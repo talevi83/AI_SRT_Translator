@@ -18,8 +18,9 @@ import traceback
 import webview
 from dotenv import dotenv_values, set_key
 
-from srt_utils import parse_srt, split_srt_file, merge_srt_files
-from translator import translate_directory, MODELS, DEFAULT_MODEL
+from srt_utils import compare_structure, list_srt_parts, merge_srt_files, parse_srt, split_srt_file
+from translator import (DEFAULT_MODEL, MODELS, RTL_LANGUAGES, Cancelled, TranslationEngine,
+                        translate_directory)
 
 APP_NAME = "AI SRT Translator"
 
@@ -43,6 +44,8 @@ DEFAULT_DIRS = {"split": "split", "merge": "merge", "output": "translated_file"}
 DEFAULT_CHUNK = 150
 DEFAULT_THINKING = "low"
 THINKING_LEVELS = ("low", "medium", "high")
+DEFAULT_WORKERS = 3
+MAX_WORKERS = 8
 
 
 def read_env():
@@ -78,18 +81,24 @@ class LogStream:
     def __init__(self, emit):
         self.emit = emit
         self.buffer = ""
+        self.lock = threading.Lock()  # translation workers print from several threads
 
     def write(self, text):
-        self.buffer += text
-        while "\n" in self.buffer:
-            line, self.buffer = self.buffer.split("\n", 1)
-            if line.strip():
-                self.emit(line)
+        with self.lock:
+            self.buffer += text
+            lines = []
+            while "\n" in self.buffer:
+                line, self.buffer = self.buffer.split("\n", 1)
+                if line.strip():
+                    lines.append(line)
+        for line in lines:
+            self.emit(line)
 
     def flush(self):
-        if self.buffer.strip():
-            self.emit(self.buffer)
-        self.buffer = ""
+        with self.lock:
+            rest, self.buffer = self.buffer, ""
+        if rest.strip():
+            self.emit(rest)
 
 
 class Api:
@@ -98,6 +107,7 @@ class Api:
         self._file = None
         self._busy = False
         self._lock = threading.Lock()
+        self._cancel = threading.Event()
 
     # ---------- plumbing ----------
     def _send(self, event, **data):
@@ -149,6 +159,7 @@ class Api:
             "thinking": self._thinking(),
             "model": self._model(),
             "flex": self._flex(),
+            "workers": self._workers(),
             "models": [{"id": k, **v} for k, v in MODELS.items()],
             "file": self._file_info() if self._file else None,
             "busy": self._busy,
@@ -236,6 +247,26 @@ class Api:
         write_env("THINKING_LEVEL", level)
         return self.get_state()
 
+    def _workers(self):
+        try:
+            value = int(read_env().get("PARALLEL_WORKERS", "") or DEFAULT_WORKERS)
+        except ValueError:
+            return DEFAULT_WORKERS
+        return min(max(value, 1), MAX_WORKERS)
+
+    def save_workers(self, workers):
+        try:
+            workers = int(workers)
+        except (TypeError, ValueError):
+            return {"error": "bad_workers"}
+        if not 1 <= workers <= MAX_WORKERS:
+            return {"error": "bad_workers"}
+        write_env("PARALLEL_WORKERS", str(workers))
+        return self.get_state()
+
+    def _target_lang(self):
+        return (read_env().get("TARGET_LANG", "") or "he").strip()
+
     def save_ui_prefs(self, lang, theme):
         write_env("UI_LANG", lang)
         write_env("UI_THEME", theme)
@@ -260,28 +291,41 @@ class Api:
             if not self._file:
                 return {"error": "no_file"}
             self._busy = True
+            self._cancel.clear()
 
         def runner():
             stream = LogStream(self._log)
             ok = False
             result = {}
+            cancelled = False
             try:
                 with contextlib.redirect_stdout(stream):
                     result = target(*args) or {}
                     stream.flush()
                 ok = True
+            except Cancelled:
+                stream.flush()
+                cancelled = True
+                self._log("Cancelled. Finished parts are kept - run again to continue.", "warn")
+                result = {"cancelled": True}
             except Exception as e:
                 stream.flush()
                 self._log(str(e), "error")
                 result = {"error_message": str(e)}
             finally:
                 self._busy = False
-                self._send("done", job=name, ok=ok and not result.get("failed"),
+                self._send("done", job=name, ok=ok and not result.get("failed"), cancelled=cancelled,
                            result=result, file=self._file_info())
 
         self._send("started", job=name)
         threading.Thread(target=runner, daemon=True).start()
         return {"ok": True}
+
+    def cancel_job(self):
+        if self._busy:
+            self._cancel.set()
+            self._log("Cancelling - waiting for requests in flight to finish...", "warn")
+        return True
 
     def _do_split(self, chunk_size):
         split_dir = self._dirs()["split"]
@@ -297,39 +341,51 @@ class Api:
         if self._count_srt(dirs["split"]) == 0:
             raise ValueError(f"No split files found in {dirs['split']}. Run the split step first.")
         self._send("stage", stage="translate", status="active")
-        prepare_directory(dirs["merge"], clear=True)
+        # Not cleared: parts translated by an earlier (failed / cancelled) run are reused
+        prepare_directory(dirs["merge"], clear=False)
 
         def progress(current, total, filename):
             self._send("progress", stage="translate", current=current, total=total, filename=filename)
+            self._send("usage", **engine.usage)
 
-        ok = translate_directory(dirs["split"], dirs["merge"], api_key=api_key,
-                                 progress_callback=progress, thinking_level=self._thinking(),
-                                 model=self._model(), flex=self._flex())
+        engine = TranslationEngine(api_key=api_key, model=self._model(), thinking_level=self._thinking(),
+                                   flex=self._flex(), target_lang=self._target_lang(),
+                                   cancel_event=self._cancel)
+        try:
+            ok, summary = translate_directory(dirs["split"], dirs["merge"], engine,
+                                              progress_callback=progress, workers=self._workers())
+        finally:
+            self._send("usage", **engine.usage)
         if not ok:
             self._send("stage", stage="translate", status="error")
-            raise RuntimeError("Some parts failed translation or validation. See the log above.")
+            raise RuntimeError("Some parts failed translation. Run again to retry only the failed parts.")
         self._log("All parts translated and validated.", "success")
         self._send("stage", stage="translate", status="done")
-        return {}
+        return {"usage": engine.usage, "warnings": summary.get("warnings", [])}
 
     def _do_merge(self):
         dirs = self._dirs()
-        files = [os.path.join(dirs["merge"], f) for f in os.listdir(dirs["merge"])
-                 if f.lower().endswith(".srt")] if os.path.isdir(dirs["merge"]) else []
+        files = list_srt_parts(dirs["merge"])
         if not files:
             raise ValueError(f"No translated files found in {dirs['merge']}. Run the translation step first.")
         self._send("stage", stage="merge", status="active")
         prepare_directory(dirs["output"], clear=False)
         final = self._final_path()
-        count = merge_srt_files(files, final)
-        self._log(f"Merged {len(files)} files ({count} blocks) -> {final}", "success")
+        count = merge_srt_files(files, final, rtl_fix=self._target_lang() in RTL_LANGUAGES)
+        ok, reason = compare_structure(parse_srt(self._file), parse_srt(final))
+        if ok:
+            self._log(f"Merged {len(files)} files ({count} blocks) -> {final}", "success")
+            self._log("Final check passed: every block and timestamp matches the source file.", "success")
+        else:
+            self._log(f"Merged {len(files)} files ({count} blocks) -> {final}")
+            self._log(f"Warning - the merged file doesn't match the source: {reason}", "warn")
         self._send("stage", stage="merge", status="done")
         return {"final": final}
 
     def _do_pipeline(self, chunk_size, api_key):
         self._do_split(chunk_size)
-        self._do_translate(api_key)
-        return self._do_merge()
+        result = self._do_translate(api_key)
+        return {**result, **self._do_merge()}
 
     def _saved_chunk(self):
         try:
