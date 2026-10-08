@@ -1,8 +1,21 @@
+# AI SRT Translator 🎬🤖
+
+**AI SRT Translator** is a smart, automated tool designed to translate subtitle files (.srt) using advanced AI models. 
+
+Unlike traditional word-for-word translators, this tool leverages LLMs to understand context, idioms, and natural phrasing. It ensures high-quality subtitle translations while completely preserving the original timestamps, sequence, and file formatting.
+
+## Key Features
+* 🧠 **Context-Aware Translation:** Translates full sentences and context, not just isolated words.
+* ⏱️ **Timestamp Preservation:** Keeps your original `.srt` timing and structure exactly intact.
+* 🌍 **Multi-Language Support:** Translate to and from multiple languages effortlessly.
+* 🚀 **Automated Workflow:** Process entire subtitle files quickly and efficiently.
+
+ ---
 # AI SRT Translator
 
 A desktop app that translates `.srt` subtitle files from **English to Hebrew** using Google **Gemini** — while keeping every subtitle block, index and timestamp exactly in sync with the original.
 
-> **בעברית:** אפליקציית דסקטופ שמתרגמת קבצי כתוביות SRT מאנגלית לעברית בעזרת Gemini. הקובץ מפוצל לחלקים, כל חלק מתורגם ונבדק שלא חסרים בו בלוקים או שהזמנים לא השתנו, ובסוף הכול מאוחד לקובץ אחד. ממשק בעברית (RTL) ובאנגלית, מצב כהה/בהיר וגרירת קבצים.
+>  אפליקציית דסקטופ שמתרגמת קבצי כתוביות SRT מאנגלית לעברית בעזרת Gemini. הקובץ מפוצל לחלקים, כל חלק מתורגם ונבדק שלא חסרים בו בלוקים או שהזמנים לא השתנו, ובסוף הכול מאוחד לקובץ אחד. ממשק בעברית (RTL) ובאנגלית, מצב כהה/בהיר וגרירת קבצים.
 
 ---
 
