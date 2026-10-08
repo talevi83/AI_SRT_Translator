@@ -29,9 +29,11 @@ A desktop app that translates `.srt` subtitle files from **English to Hebrew** u
 
 ## Requirements
 
-- Windows 10 / 11
+- Windows 10 / 11, macOS 11+ or Linux (desktop)
 - [Python 3.11+](https://www.python.org/downloads/) (added to PATH)
-- Microsoft Edge WebView2 Runtime — preinstalled on Windows 11 and most Windows 10 machines
+- **Windows:** Microsoft Edge WebView2 Runtime — preinstalled on Windows 11 and most Windows 10 machines
+- **macOS:** nothing extra (uses the built-in WebKit)
+- **Linux:** either the GTK WebKit bindings (`sudo apt install python3-gi gir1.2-webkit2-4.1`, then create the venv with `--system-site-packages`) or nothing — `run.sh` falls back to installing the pip-only Qt backend automatically
 - A Gemini API key from [Google AI Studio](https://aistudio.google.com/apikey) with [billing enabled](https://aistudio.google.com/billing) for large files
 
 ## Getting started
@@ -41,7 +43,11 @@ A desktop app that translates `.srt` subtitle files from **English to Hebrew** u
    git clone <repo-url>
    cd AI_SRT_Translator
    ```
-2. Double-click **`running_script.bat`**.
+2. Start the app:
+   - **Windows:** double-click **`running_script.bat`**
+   - **macOS:** double-click **`run.command`** (or run `./run.sh` in Terminal)
+   - **Linux:** run `./run.sh`
+
    On first run it creates a virtual environment and installs the requirements, then opens the app.
 3. Go to **Settings** and paste your Gemini API key
    (or copy `.env.example` to `.env` and fill in `GEMINI_API_KEY`).
@@ -63,12 +69,21 @@ translated_file/
   └── Movie_translated.srt
 ```
 
-## Building a standalone EXE
+## Building a standalone app
 
-Double-click **`build.bat`**. It installs PyInstaller and packs the whole app into a single
-`dist\AI SRT Translator.exe` with the app icon — no Python needed to run it.
+| OS | Command | Output |
+| --- | --- | --- |
+| Windows | double-click **`build.bat`** | `dist\AI SRT Translator.exe` |
+| macOS | `./build.sh` | `dist/AI SRT Translator.app` |
+| Linux | `./build.sh` | `dist/AI SRT Translator` (single binary) |
 
-- Your `.env` (API key and settings) is copied next to the EXE on the first build; keep it in the same folder.
+The build installs PyInstaller and packs the whole app with its icon — no Python needed to run it.
+Builds are per-OS: build on the system you want to run on.
+
+- Your `.env` (API key and settings) is copied on the first build. On Windows / Linux it sits next to the
+  executable — keep it in the same folder. On macOS the `.app` keeps it in
+  `~/Library/Application Support/AI SRT Translator/`.
+- The macOS build is not code-signed. On first launch, right-click the app → **Open** to get past Gatekeeper.
 - Rebuild after every code change.
 
 ## Configuration
@@ -96,12 +111,16 @@ app.py             # pywebview window + Python API exposed to the UI
 srt_utils.py       # SRT parsing, splitting, merging and translation validation
 translator.py      # Gemini translation with retries
 web/               # UI: index.html, style.css, app.js, i18n.js (Hebrew / English strings)
-running_script.bat # Creates the venv, installs requirements, launches the app
-build.bat          # Builds a standalone EXE with PyInstaller
+running_script.bat # Windows: creates the venv, installs requirements, launches the app
+run.sh             # macOS / Linux launcher (run.command = double-clickable on macOS)
+build.bat          # Windows: builds a standalone EXE with PyInstaller
+build.sh           # macOS / Linux: builds a .app / binary with PyInstaller
 ```
 
 ## Troubleshooting
 
-- **The window doesn't open** — check `app_error.log` in the app folder.
+- **The window doesn't open** — check `app_error.log` in the app folder
+  (macOS `.app`: `~/Library/Application Support/AI SRT Translator/`).
+- **Linux: "You must have either QT or GTK"** — run `./run.sh` (it installs the Qt backend), or install the GTK packages listed under Requirements.
 - **"Validation failed" retries in the log** — Gemini dropped or merged blocks; the app retries automatically. If it happens a lot, lower the chunk size.
 - **Missing key warning** — set the key in Settings, or check that `.env` contains `GEMINI_API_KEY=...`.

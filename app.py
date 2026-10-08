@@ -21,11 +21,18 @@ from dotenv import dotenv_values, set_key
 from srt_utils import parse_srt, split_srt_file, merge_srt_files
 from translator import translate_directory, MODELS, DEFAULT_MODEL
 
+APP_NAME = "AI SRT Translator"
+
 if getattr(sys, "frozen", False):
-    # Running as a PyInstaller EXE: bundled files (web/, icon) are unpacked to a temp
-    # folder, while user files (.env, logs) live next to the EXE.
+    # Running as a PyInstaller build: bundled files (web/, icon) are unpacked to a temp
+    # folder, while user files (.env, logs) live next to the executable.
     RESOURCE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
     BASE_DIR = os.path.dirname(sys.executable)
+    if sys.platform == "darwin":
+        # Inside a .app the executable sits in Contents/MacOS, which is replaced on every
+        # update and may be read-only - keep user files in Application Support instead.
+        BASE_DIR = os.path.join(os.path.expanduser("~/Library/Application Support"), APP_NAME)
+        os.makedirs(BASE_DIR, exist_ok=True)
 else:
     RESOURCE_DIR = BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -371,7 +378,7 @@ class Api:
 def main():
     api = Api()
     window = webview.create_window(
-        "AI SRT Translator",
+        APP_NAME,
         url=os.path.join(WEB_DIR, "index.html"),
         js_api=api,
         width=1100,
