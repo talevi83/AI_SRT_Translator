@@ -92,6 +92,9 @@ class Analysis(BaseModel):
 
 
 ANALYSIS_MAX_CHARS = 200_000       # source text sent to the analysis call (~50k tokens)
+ANALYSIS_MODEL = DEFAULT_MODEL     # the glossary is built once per file - use the best model for it
+ANALYSIS_THINKING = "medium"
+GLOSSARY_VERSION = "3"             # bump to regenerate glossaries made by an older prompt
 
 
 def _is_capacity_error(e):
@@ -114,22 +117,32 @@ def build_system_prompt(source_lang="auto", target_lang="he", convert_units=True
         "in the same order. Never merge, split, skip, reorder or add items, even if a sentence continues "
         "across items.",
         f"- Write natural, idiomatic {target} as it is actually spoken, matching each character's tone and register. "
-        "Keep it concise - subtitles must be readable at a glance.",
+        "Translate the full meaning of every item - don't drop information - but prefer short, natural "
+        "phrasing that reads easily on screen.",
         "- Keep the line structure: at most 2 lines per item, breaking lines where the source does.",
         "- Keep formatting tags such as <i>, </i>, <b>, <font ...> and {\\an8} exactly, around the matching words. "
         "Keep music notes (♪) and other symbols.",
         "- Translate sound and speaker labels in brackets, e.g. [laughs], too.",
-        "- Keep character and place names consistent throughout; transliterate them rather than translating them.",
+        "- Names: transliterate only the names of people (and pets) and brand / company names. Names of places, "
+        "sites, buildings, events and nicknames that are made of ordinary words (e.g. \"Base Camp Two\", "
+        "\"the Triangle\", \"Hill Country\") must be TRANSLATED into natural "
+        f"{target}, the way a professional {target} subtitler would - never written as a phonetic copy of the "
+        "English words. Keep every name consistent throughout.",
+        "- Abbreviations: use an established target-language abbreviation only if one is in common use; "
+        "otherwise keep the original Latin abbreviation (EEG, GPS, DNA) or spell the term out. Never invent "
+        "new abbreviations.\n"
         "- Infer gender (speaker and addressee), formality and who is talking from the context, and use the "
         "correct grammatical forms.",
     ]
     if convert_units:
         rules.append("- Convert imperial units to metric (miles -> km, pounds -> kg, feet -> meters, "
-                     "Fahrenheit -> Celsius, etc.), rounding to natural values.")
+                     "Fahrenheit -> Celsius, etc.) and convert the NUMBER too, rounding to natural values: "
+                     "500 feet -> 150 meters, \"hundreds of feet\" -> tens of meters (not hundreds), "
+                     "a mile -> 1.6 km, 100 pounds -> 45 kg.")
     if target_lang == "he":
         rules.append("- Use modern spoken Israeli Hebrew, without niqqud.")
     if glossary.strip():
-        rules += ["", "Glossary and character notes - follow them exactly:", glossary.strip()]
+        rules += ["", "Glossary and character notes - use these names, genders and terms consistently:", glossary.strip()]
     if instructions.strip():
         rules += ["", "Additional instructions from the user:", instructions.strip()]
     return "\n".join(rules)
@@ -203,12 +216,13 @@ class TranslationEngine:
         if self.cancel_event.is_set():
             raise Cancelled()
 
-    def _config(self, use_flex, schema=list[Item], system_prompt=None):
+    def _config(self, use_flex, schema=list[Item], system_prompt=None, thinking_level=None):
         kwargs = dict(system_instruction=system_prompt or self.system_prompt, temperature=0.2)
         if schema is not None:
             kwargs.update(response_mime_type="application/json", response_schema=schema)
-        if self.thinking_level and not self._no_thinking_level:
-            kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=self.thinking_level)
+        level = thinking_level or self.thinking_level
+        if level and not self._no_thinking_level:
+            kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=level)
         if use_flex and not self._flex_unsupported:
             try:
                 return types.GenerateContentConfig(service_tier="flex", **kwargs)
@@ -218,14 +232,14 @@ class TranslationEngine:
                       f"Run 'pip install -U google-genai' to enable it. ({e})")
         return types.GenerateContentConfig(**kwargs)
 
-    def _record_usage(self, response, flex_used):
+    def _record_usage(self, response, flex_used, model=None):
         usage = getattr(response, "usage_metadata", None)
         if not usage:
             return
         prompt = usage.prompt_token_count or 0
         output = usage.candidates_token_count or 0
         thoughts = usage.thoughts_token_count or 0
-        price = MODELS[self.model]
+        price = MODELS[model or self.model]
         cost = (prompt * price["input"] + (output + thoughts) * price["output"]) / 1e6
         if flex_used:
             cost *= 0.5
@@ -237,7 +251,7 @@ class TranslationEngine:
             u["cost"] += cost
             u["calls"] += 1
 
-    def generate(self, contents, label, schema=list[Item], system_prompt=None):
+    def generate(self, contents, label, schema=list[Item], system_prompt=None, model=None, thinking_level=None):
         """One model call with thinking / flex / rate-limit handling. Other errors are raised."""
         use_flex = self.flex
         flex_busy = 0
@@ -248,9 +262,9 @@ class TranslationEngine:
             flex_used = use_flex and self.flex_client is not None and not self._flex_unsupported
             try:
                 response = client.models.generate_content(
-                    model=self.model, contents=contents,
-                    config=self._config(use_flex, schema, system_prompt))
-                self._record_usage(response, flex_used)
+                    model=model or self.model, contents=contents,
+                    config=self._config(use_flex, schema, system_prompt, thinking_level))
+                self._record_usage(response, flex_used, model)
                 return response
             except Cancelled:
                 raise
@@ -297,16 +311,24 @@ class TranslationEngine:
         prompt = (
             f"You prepare a translation brief for translating these subtitles into {target}. "
             "Read the dialogue and return:\n"
-            "- characters: every named character - name as written in the source, gender (male / female / "
-            f"unknown), the name written in {target} (transliterated), and short notes (role, relationships, "
+            "- characters: every named PERSON - name as written in the source, gender (male / female / "
+            f"unknown), the name written in {target} letters, and short notes (role, relationships, "
             "who they address formally or informally).\n"
-            f"- terms: recurring names of places, organisations, made-up words, ranks and slang, with a consistent "
-            f"{target} translation.\n"
+            "- terms: recurring places, sites, organisations, made-up words, ranks, jargon and slang, each with the "
+            f"{target} rendering a professional {target} subtitler would use. TRANSLATE every term that is made of "
+            "ordinary words (\"Base Camp Two\" is translated word by word into natural "
+            f"{target}, not written phonetically); transliterate only personal names and brand names. "
+            "Keep established translations of well-known terms (e.g. UFO = עב\"ם in Hebrew). For abbreviations, use "
+            "an established target-language abbreviation only if it is in common use, otherwise keep the Latin "
+            "abbreviation (EEG, GPS) - never invent new abbreviations.\n"
             "- tone: one or two sentences on genre, register and how the characters speak.\n"
             "Be concise. Only include what actually appears in the text."
         )
         text = "\n".join(b.text for b in blocks if b.text.strip())[:ANALYSIS_MAX_CHARS]
-        response = self.generate(text, "analysis", schema=Analysis, system_prompt=prompt)
+        # One call per file, so it always uses the strongest model with more thinking - a wrong
+        # entry here would be repeated in every part, whatever model translates the parts.
+        response = self.generate(text, "analysis", schema=Analysis, system_prompt=prompt,
+                                 model=ANALYSIS_MODEL, thinking_level=ANALYSIS_THINKING)
         result = getattr(response, "parsed", None)
         if result is None:
             result = Analysis(**json.loads(response.text))
@@ -387,7 +409,7 @@ _GLOSSARY_HEADER = "# Auto-generated for: "
 
 
 def _source_hash(blocks, target_lang):
-    raw = target_lang + "\n" + "\n".join(b.text for b in blocks)
+    raw = GLOSSARY_VERSION + target_lang + "\n" + "\n".join(b.text for b in blocks)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 

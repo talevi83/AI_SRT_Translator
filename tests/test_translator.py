@@ -191,13 +191,16 @@ def test_glossary_is_built_once_and_reused(tmp_path):
 
     calls = []
 
-    def fake_generate(contents, label, schema=None, system_prompt=None):
+    def fake_generate(contents, label, schema=None, system_prompt=None, model=None, thinking_level=None):
         calls.append(label)
+        # The glossary always comes from the strongest model, whatever model translates the parts
+        assert model == translator.ANALYSIS_MODEL and thinking_level == translator.ANALYSIS_THINKING
+        assert "TRANSLATE every term" in system_prompt
         analysis = Analysis(characters=[{"name": "Walter", "gender": "male", "target_name": "וולטר", "notes": "teacher"}],
                             terms=[{"source": "Heisenberg", "target": "הייזנברג"}], tone="Dark drama.")
         return SimpleNamespace(parsed=analysis)
 
-    engine, _ = make_engine(hebrew)
+    engine, _ = make_engine(hebrew, model="gemini-3.1-flash-lite")
     engine.generate = fake_generate
     blocks = parse_srt_text(SRT)
     glossary = load_or_build_glossary(engine, blocks, str(tmp_path))
@@ -213,3 +216,27 @@ def test_glossary_is_built_once_and_reused(tmp_path):
     before = engine.signature()
     engine.set_glossary(edited)
     assert engine.signature() != before and "ואלטר" in engine.system_prompt
+
+
+def test_names_rule_translates_descriptive_place_names():
+    prompt = build_system_prompt(target_lang="he")
+    assert "transliterate only the names of people" in prompt
+    assert "never written as a phonetic copy" in prompt
+
+
+def test_analysis_usage_is_priced_with_the_analysis_model():
+    engine, fake = make_engine(lambda p, n: [], model="gemini-3.1-flash-lite")
+    real = fake.generate_content
+    seen = {}
+
+    def capture(model, contents, config):
+        seen["model"], seen["thinking"] = model, config.thinking_config.thinking_level
+        analysis = translator.Analysis(characters=[], terms=[], tone="x")
+        usage = SimpleNamespace(prompt_token_count=1_000_000, candidates_token_count=0, thoughts_token_count=0)
+        return SimpleNamespace(parsed=analysis, usage_metadata=usage)
+
+    engine.standard_client = SimpleNamespace(models=SimpleNamespace(generate_content=capture))
+    engine.analyze(parse_srt_text(SRT))
+    assert seen["model"] == translator.ANALYSIS_MODEL
+    assert str(seen["thinking"]).lower().endswith("medium")
+    assert engine.usage["cost"] == pytest.approx(translator.MODELS[translator.ANALYSIS_MODEL]["input"])
