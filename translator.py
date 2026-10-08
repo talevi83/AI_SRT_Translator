@@ -73,6 +73,27 @@ class Item(BaseModel):
     text: str
 
 
+class Character(BaseModel):
+    name: str
+    gender: str          # male / female / unknown
+    target_name: str     # how the name is written in the target language
+    notes: str           # role, who they talk to formally / informally, etc.
+
+
+class Term(BaseModel):
+    source: str
+    target: str
+
+
+class Analysis(BaseModel):
+    characters: list[Character]
+    terms: list[Term]
+    tone: str
+
+
+ANALYSIS_MAX_CHARS = 200_000       # source text sent to the analysis call (~50k tokens)
+
+
 def _is_capacity_error(e):
     msg = str(e).lower()
     return any(k in msg for k in ("503", "429", "unavailable", "resource_exhausted", "overloaded", "rate limit"))
@@ -112,6 +133,21 @@ def build_system_prompt(source_lang="auto", target_lang="he", convert_units=True
     if instructions.strip():
         rules += ["", "Additional instructions from the user:", instructions.strip()]
     return "\n".join(rules)
+
+
+def format_analysis(analysis):
+    lines = []
+    if analysis.characters:
+        lines.append("Characters:")
+        for c in analysis.characters:
+            notes = f" - {c.notes}" if c.notes.strip() else ""
+            lines.append(f"- {c.name} ({c.gender}) = {c.target_name}{notes}")
+    if analysis.terms:
+        lines.append("Terms:")
+        lines += [f"- {t.source} = {t.target}" for t in analysis.terms]
+    if analysis.tone.strip():
+        lines.append(f"Tone: {analysis.tone.strip()}")
+    return "\n".join(lines)
 
 
 def needs_translation(text):
@@ -167,10 +203,10 @@ class TranslationEngine:
         if self.cancel_event.is_set():
             raise Cancelled()
 
-    def _config(self, use_flex, json_schema=True, system_prompt=None):
+    def _config(self, use_flex, schema=list[Item], system_prompt=None):
         kwargs = dict(system_instruction=system_prompt or self.system_prompt, temperature=0.2)
-        if json_schema:
-            kwargs.update(response_mime_type="application/json", response_schema=list[Item])
+        if schema is not None:
+            kwargs.update(response_mime_type="application/json", response_schema=schema)
         if self.thinking_level and not self._no_thinking_level:
             kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=self.thinking_level)
         if use_flex and not self._flex_unsupported:
@@ -201,7 +237,7 @@ class TranslationEngine:
             u["cost"] += cost
             u["calls"] += 1
 
-    def generate(self, contents, label, json_schema=True, system_prompt=None):
+    def generate(self, contents, label, schema=list[Item], system_prompt=None):
         """One model call with thinking / flex / rate-limit handling. Other errors are raised."""
         use_flex = self.flex
         flex_busy = 0
@@ -213,7 +249,7 @@ class TranslationEngine:
             try:
                 response = client.models.generate_content(
                     model=self.model, contents=contents,
-                    config=self._config(use_flex, json_schema, system_prompt))
+                    config=self._config(use_flex, schema, system_prompt))
                 self._record_usage(response, flex_used)
                 return response
             except Cancelled:
@@ -244,6 +280,37 @@ class TranslationEngine:
                 limited += 1
                 print(f"Rate limited on {label}. Waiting {wait}s (retry {limited}/{len(RATE_LIMIT_BACKOFF)})...")
                 self.sleep(wait)
+
+    def set_glossary(self, glossary):
+        self.glossary = glossary or ""
+        self.system_prompt = build_system_prompt(self.source_lang, self.target_lang, self.convert_units,
+                                                 self.glossary, self.instructions)
+
+    # ---------- analysis ----------
+    def analyze(self, blocks):
+        """
+        One call over the whole source text that returns a glossary: characters with gender and
+        target-language spelling, recurring terms and the overall tone. Every part is then
+        translated with it, so names, genders and terms stay consistent across parts.
+        """
+        target = LANGUAGES.get(self.target_lang, self.target_lang)
+        prompt = (
+            f"You prepare a translation brief for translating these subtitles into {target}. "
+            "Read the dialogue and return:\n"
+            "- characters: every named character - name as written in the source, gender (male / female / "
+            f"unknown), the name written in {target} (transliterated), and short notes (role, relationships, "
+            "who they address formally or informally).\n"
+            f"- terms: recurring names of places, organisations, made-up words, ranks and slang, with a consistent "
+            f"{target} translation.\n"
+            "- tone: one or two sentences on genre, register and how the characters speak.\n"
+            "Be concise. Only include what actually appears in the text."
+        )
+        text = "\n".join(b.text for b in blocks if b.text.strip())[:ANALYSIS_MAX_CHARS]
+        response = self.generate(text, "analysis", schema=Analysis, system_prompt=prompt)
+        result = getattr(response, "parsed", None)
+        if result is None:
+            result = Analysis(**json.loads(response.text))
+        return format_analysis(result)
 
     # ---------- translation ----------
     def _request(self, items, before, after, label):
@@ -315,6 +382,40 @@ class TranslationEngine:
 
 
 # ---------- folder pipeline ----------
+GLOSSARY_FILE = "glossary.txt"
+_GLOSSARY_HEADER = "# Auto-generated for: "
+
+
+def _source_hash(blocks, target_lang):
+    raw = target_lang + "\n" + "\n".join(b.text for b in blocks)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def load_or_build_glossary(engine, source_blocks, folder):
+    """
+    Reuse folder/glossary.txt if it was made for this source text (the user may have edited it),
+    otherwise analyse the source and save a new one. Returns the glossary text.
+    """
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, GLOSSARY_FILE)
+    header = f"{_GLOSSARY_HEADER}{_source_hash(source_blocks, engine.target_lang)}"
+    try:
+        with open(path, encoding="utf-8") as f:
+            first, _, body = f.read().partition("\n")
+        if first.strip() == header:
+            print(f"Using the glossary in {path}")
+            return body.strip()
+    except OSError:
+        pass
+    print("Analysing characters, genders and terms...")
+    glossary = engine.analyze(source_blocks)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"{header}\n{glossary}\n")
+    print(f"Glossary saved to {path} - edit it and run again to change names or terms.")
+    return glossary
+
+
+
 def _read_manifest(output_dir):
     try:
         with open(os.path.join(output_dir, MANIFEST), encoding="utf-8") as f:

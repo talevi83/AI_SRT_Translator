@@ -184,6 +184,13 @@ input:not(.stepper input) {
   border: 1px solid var(--border); background: var(--panel-2);
   outline: none; width: 100%; transition: border-color .15s, box-shadow .15s;
 }
+textarea {
+  padding: 10px 12px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--panel-2);
+  outline: none; width: 100%; resize: vertical; font: inherit; font-size: 13.5px; line-height: 1.5; color: inherit;
+  transition: border-color .15s, box-shadow .15s;
+}
+textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+textarea::placeholder { color: var(--text-3); }
 input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 input::placeholder { color: var(--text-3); }
 .field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; font-weight: 600; color: var(--text-2); }
@@ -332,6 +339,7 @@ body.busy .btn.primary:disabled::after {
 .log-line.success span:last-child { color: var(--ok); }
 .log-line.error span:last-child { color: var(--err); }
 .log-line.warn span:last-child { color: var(--warn); }
+.log-line.dim span:last-child { color: var(--text-3); }
 .log-line.head { margin-top: 6px; }
 .log-line.head span:last-child { color: var(--accent); font-weight: 600; }
 

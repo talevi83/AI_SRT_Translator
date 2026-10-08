@@ -20,6 +20,7 @@
     $$("[data-i18n]").forEach(el => (el.textContent = t(el.dataset.i18n)));
     $$("#lang-switch button").forEach(b => b.classList.toggle("on", b.dataset.lang === state.lang));
     $("#api-key").placeholder = t("key_placeholder");
+    $("#instructions").placeholder = t("instr_placeholder");
     renderHelp();
     renderKey();
     renderModels();
@@ -261,6 +262,8 @@
     state.models = s.models || []; state.model = s.model; state.thinking = s.thinking; state.flex = !!s.flex;
     $("#flex-toggle").checked = state.flex;
     if (s.workers) $("#workers").value = s.workers;
+    $("#glossary-toggle").checked = !!s.auto_glossary;
+    if (document.activeElement !== $("#instructions")) $("#instructions").value = s.instructions || "";
     renderModels();
   }
   // rough token estimate for a ~42 min episode (see README)
@@ -318,6 +321,15 @@
     if (!api) return;
     const res = await api.save_flex(e.target.checked);
     applyState(res); toast(t(res.flex ? "flex_on" : "flex_off"), "success");
+  });
+  $("#glossary-toggle").addEventListener("change", async e => {
+    if (!api) return;
+    const res = await api.save_auto_glossary(e.target.checked);
+    applyState(res); toast(t(res.auto_glossary ? "glossary_on" : "glossary_off"), "success");
+  });
+  $("#save-instructions").addEventListener("click", async () => {
+    if (!api) return;
+    applyState(await api.save_instructions($("#instructions").value)); toast(t("saved"), "success");
   });
   let workersTimer = null;
   $("#workers").addEventListener("input", () => {

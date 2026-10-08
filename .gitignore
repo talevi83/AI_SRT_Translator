@@ -36,3 +36,6 @@ dist/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# User's translation instructions (saved from Settings)
+instructions.txt

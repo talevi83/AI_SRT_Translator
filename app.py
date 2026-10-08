@@ -20,7 +20,7 @@ from dotenv import dotenv_values, set_key
 
 from srt_utils import compare_structure, list_srt_parts, merge_srt_files, parse_srt, split_srt_file
 from translator import (DEFAULT_MODEL, MODELS, RTL_LANGUAGES, Cancelled, TranslationEngine,
-                        translate_directory)
+                        load_or_build_glossary, translate_directory)
 
 APP_NAME = "AI SRT Translator"
 
@@ -38,6 +38,7 @@ else:
     RESOURCE_DIR = BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 ENV_FILE = os.path.join(BASE_DIR, ".env")
+INSTRUCTIONS_FILE = os.path.join(BASE_DIR, "instructions.txt")
 WEB_DIR = os.path.join(RESOURCE_DIR, "web")
 
 DEFAULT_DIRS = {"split": "split", "merge": "merge", "output": "translated_file"}
@@ -160,6 +161,8 @@ class Api:
             "model": self._model(),
             "flex": self._flex(),
             "workers": self._workers(),
+            "auto_glossary": self._auto_glossary(),
+            "instructions": self._instructions(),
             "models": [{"id": k, **v} for k, v in MODELS.items()],
             "file": self._file_info() if self._file else None,
             "busy": self._busy,
@@ -264,6 +267,25 @@ class Api:
         write_env("PARALLEL_WORKERS", str(workers))
         return self.get_state()
 
+    def _auto_glossary(self):
+        return (read_env().get("AUTO_GLOSSARY", "") or "1").strip().lower() in ("1", "true", "yes", "on")
+
+    def save_auto_glossary(self, enabled):
+        write_env("AUTO_GLOSSARY", "1" if enabled else "0")
+        return self.get_state()
+
+    def _instructions(self):
+        try:
+            with open(INSTRUCTIONS_FILE, encoding="utf-8") as f:
+                return f.read().strip()
+        except OSError:
+            return ""
+
+    def save_instructions(self, text):
+        with open(INSTRUCTIONS_FILE, "w", encoding="utf-8") as f:
+            f.write((text or "").strip() + "\n")
+        return self.get_state()
+
     def _target_lang(self):
         return (read_env().get("TARGET_LANG", "") or "he").strip()
 
@@ -350,8 +372,19 @@ class Api:
 
         engine = TranslationEngine(api_key=api_key, model=self._model(), thinking_level=self._thinking(),
                                    flex=self._flex(), target_lang=self._target_lang(),
-                                   cancel_event=self._cancel)
+                                   instructions=self._instructions(), cancel_event=self._cancel)
         try:
+            if self._auto_glossary():
+                try:
+                    glossary = load_or_build_glossary(engine, parse_srt(self._file), dirs["merge"])
+                    engine.set_glossary(glossary)
+                    sys.stdout.flush()
+                    for line in glossary.splitlines():
+                        self._log(f"  {line}", "dim")
+                except Cancelled:
+                    raise
+                except Exception as e:
+                    print(f"Warning - character / term analysis failed, translating without it: {e}")
             ok, summary = translate_directory(dirs["split"], dirs["merge"], engine,
                                               progress_callback=progress, workers=self._workers())
         finally:

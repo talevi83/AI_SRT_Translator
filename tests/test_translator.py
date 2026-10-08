@@ -184,3 +184,32 @@ def test_prompt_and_detection():
     assert looks_translated("Hello there", "שלום", "he")
     assert looks_translated("♪ ♪", "♪ ♪", "he")
     assert looks_translated("Hello", "Bonjour", "fr")  # Latin targets can't be checked
+
+
+def test_glossary_is_built_once_and_reused(tmp_path):
+    from translator import Analysis, load_or_build_glossary
+
+    calls = []
+
+    def fake_generate(contents, label, schema=None, system_prompt=None):
+        calls.append(label)
+        analysis = Analysis(characters=[{"name": "Walter", "gender": "male", "target_name": "וולטר", "notes": "teacher"}],
+                            terms=[{"source": "Heisenberg", "target": "הייזנברג"}], tone="Dark drama.")
+        return SimpleNamespace(parsed=analysis)
+
+    engine, _ = make_engine(hebrew)
+    engine.generate = fake_generate
+    blocks = parse_srt_text(SRT)
+    glossary = load_or_build_glossary(engine, blocks, str(tmp_path))
+    assert "- Walter (male) = וולטר - teacher" in glossary and "Heisenberg = הייזנברג" in glossary
+    assert load_or_build_glossary(engine, blocks, str(tmp_path)) == glossary
+    assert calls == ["analysis"]
+
+    # A user edit is kept and changes the translation signature
+    path = tmp_path / "glossary.txt"
+    path.write_text(path.read_text(encoding="utf-8").replace("וולטר", "ואלטר"), encoding="utf-8")
+    edited = load_or_build_glossary(engine, blocks, str(tmp_path))
+    assert "ואלטר" in edited and calls == ["analysis"]
+    before = engine.signature()
+    engine.set_glossary(edited)
+    assert engine.signature() != before and "ואלטר" in engine.system_prompt
