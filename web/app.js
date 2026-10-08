@@ -27,6 +27,7 @@
     renderLangs();
     renderFile();
     renderQA();
+    renderQueue();
     document.title = t("brand");
   }
 
@@ -56,6 +57,7 @@
 
   // ---------- navigation ----------
   const JOB_PAGES = ["pipeline", "split", "translate", "merge"];
+  const PROGRESS_JOBS = ["pipeline", "batch"];
   function go(page) {
     state.page = page;
     $$(".nav-item").forEach(b => b.classList.toggle("active", b.dataset.page === page));
@@ -107,12 +109,49 @@
   function setFileResult(res, announce = true) {
     if (!res) return;
     if (res.file) { state.file = res.file; resetStages(); renderFile(); }
-    if (!handleError(res) && announce && res.file) toast(t("loaded", { name: res.file.name }), "success");
+    if (res.queue) { state.queue = res.queue; renderQueue(); }
+    if (!handleError(res) && announce && res.file)
+      toast(state.queue.length > 1 ? t("queue_title", { n: state.queue.length }) : t("loaded", { name: res.file.name }), "success");
   }
   const pick = async () => { if (!api) return; setFileResult(await api.pick_file()); };
+  const pickFolder = async () => { if (!api) return; setFileResult(await api.pick_folder()); };
   $("#browse-btn").addEventListener("click", pick);
+  $("#folder-btn").addEventListener("click", pickFolder);
   $("#change-btn").addEventListener("click", pick);
-  $("#drop").addEventListener("click", e => { if (e.target.id !== "browse-btn") pick(); });
+  $("#queue-add").addEventListener("click", pick);
+  $("#drop").addEventListener("click", e => { if (!e.target.closest("button")) pick(); });
+
+  // ---------- queue (several files) ----------
+  state.queue = [];
+  function renderQueue() {
+    const q = state.queue || [];
+    const many = q.length > 1;
+    $("#queue").classList.toggle("hidden", !many);
+    $("#run-pipeline span").textContent = many ? t("run_batch", { n: q.length }) : t("run_pipeline");
+    if (!many) return;
+    $("#queue-title").textContent = t("queue_title", { n: q.length });
+    const list = $("#queue-list");
+    list.innerHTML = "";
+    q.forEach(item => {
+      const row = document.createElement("div");
+      row.className = "q-row" + (item.current ? " current" : "");
+      row.innerHTML = `<span class="q-name" dir="auto"></span><span class="q-status"></span><button class="q-x" title="✕">✕</button>`;
+      row.children[0].textContent = item.name;
+      row.title = item.error || item.path;
+      const status = item.status === "pending" && item.final ? "done" : item.status;
+      row.children[1].className = "q-status " + status;
+      row.children[1].textContent = t("q_" + status);
+      row.addEventListener("click", async e => {
+        if (state.busy || !api) return;
+        const res = e.target.closest(".q-x") ? await api.remove_queue_item(item.path) : await api.select_queue_item(item.path);
+        if (handleError(res)) return;
+        if (res.file) { state.file = res.file; resetStages(); }
+        else state.file = null;
+        state.queue = res.queue || []; renderFile(); renderQueue();
+      });
+      list.appendChild(row);
+    });
+  }
 
   // drag & drop visual (the actual path is delivered by Python)
   let dragDepth = 0;
@@ -241,7 +280,7 @@
         state.job = e.job;
         setBusy(true);
         $("#result").classList.add("hidden");
-        if (e.job === "pipeline") resetStages();
+        if (e.job === "pipeline" || e.job === "batch") resetStages();
         if (e.job !== "fix" && e.job !== "pipeline") { state.qa = null; renderQA(); }
         if (e.job === "translate") { $("#trans-progress").style.width = "0%"; $("#trans-status").textContent = ""; }
         renderUsage(null);
@@ -252,7 +291,7 @@
         break;
       case "stage":
         setStage(e.stage, e.status);
-        if (state.job === "pipeline") {
+        if (PROGRESS_JOBS.includes(state.job)) {
           if (e.stage === "split" && e.status === "done") setProgress(0.1);
           if (e.stage === "translate" && e.status === "done") setProgress(0.9);
           if (e.stage === "merge" && e.status === "done") setProgress(1);
@@ -269,18 +308,28 @@
         $("#st-translate-sub").textContent = txt;
         $("#trans-status").textContent = e.filename ? `${txt} · ${e.filename}` : txt;
         $("#trans-progress").style.width = (e.current / e.total) * 100 + "%";
-        if (state.job === "pipeline") setProgress(0.1 + 0.8 * (e.current / e.total));
+        if (PROGRESS_JOBS.includes(state.job)) setProgress(0.1 + 0.8 * (e.current / e.total));
         break;
       }
       case "done":
         setBusy(false);
         if (e.file) state.file = e.file;
+        if (e.queue) { state.queue = e.queue; renderQueue(); }
         if (e.result && e.result.parts) $("#st-split-sub").textContent = t("st_parts", { n: e.result.parts });
         renderFile();
         if (e.cancelled) toast(t("cancelled"), "warn");
         else toast(e.ok ? t("job_done") : t("job_failed"), e.ok ? "success" : "error");
         if (!e.ok) $$(".stage").forEach(s => { if (s.dataset.status === "active") setStage(s.dataset.stage, "error"); });
         state.job = null;
+        break;
+      case "batch":
+        state.file = e.file; state.queue = e.queue;
+        resetStages(); renderFile(); renderQueue();
+        $("#st-split-sub").textContent = "";
+        toast(t("batch_progress", { c: e.current, t: e.total, name: e.name }), "info");
+        break;
+      case "queue":
+        state.queue = e.queue; renderQueue();
         break;
       case "file_dropped":
         setFileResult(e.result);
@@ -460,6 +509,7 @@
     if (s.chunk) $("#chunk").value = $("#chunk-split").value = s.chunk;
     applyState(s);
     if (s.file) state.file = s.file;
+    state.queue = s.queue || [];
     applyTheme(); applyLang(); go("pipeline");
     if (!s.has_key) setTimeout(() => toast(t("err_no_key"), "warn"), 600);
   }

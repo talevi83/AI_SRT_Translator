@@ -125,6 +125,21 @@ code { font-family: var(--mono); }
 .drop-icon { width: 48px; height: 48px; border-radius: 12px; background: var(--accent-soft); color: var(--accent); display: grid; place-items: center; flex: none; }
 .drop-icon svg { width: 26px; height: 26px; }
 .drop-text { flex: 1; }
+.drop-actions { display: flex; gap: 8px; }
+.queue { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+.queue-head { display: flex; justify-content: space-between; align-items: center; font-size: 13px; font-weight: 700; color: var(--text-2); }
+.queue-list { display: flex; flex-direction: column; gap: 4px; max-height: 230px; overflow: auto; }
+.q-row { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 9px; background: var(--panel-2); cursor: pointer; border: 1px solid transparent; font-size: 13px; }
+.q-row:hover { border-color: var(--border); }
+.q-row.current { border-color: var(--accent); }
+.q-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.q-status { font-size: 11.5px; font-weight: 700; padding: 2px 9px; border-radius: 99px; background: var(--panel); color: var(--text-3); white-space: nowrap; }
+.q-status.running { background: var(--accent-soft); color: var(--accent); }
+.q-status.done { background: rgba(34,197,94,.14); color: var(--ok); }
+.q-status.failed { background: rgba(239,68,68,.12); color: var(--err); }
+.q-x { border: 0; background: none; color: var(--text-3); cursor: pointer; font-size: 16px; line-height: 1; padding: 0 2px; }
+.q-x:hover { color: var(--err); }
+body.busy .q-x { visibility: hidden; }
 .drop-title { font-weight: 700; font-size: 15.5px; }
 .drop-sub { color: var(--text-2); font-size: 13px; }
 

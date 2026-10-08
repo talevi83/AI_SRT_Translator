@@ -111,6 +111,9 @@ class Api:
         self._busy = False
         self._lock = threading.Lock()
         self._cancel = threading.Event()
+        self._queue = []          # [{"path", "status", "final", "error"}] - files for a batch run
+        self._usage_base = {}     # usage of earlier files in the current batch
+        self._usage_total = {}
 
     # ---------- plumbing ----------
     def _send(self, event, **data):
@@ -121,24 +124,31 @@ class Api:
     def _log(self, message, level="info"):
         self._send("log", message=message, level=level)
 
-    def _dirs(self):
+    def _dirs(self, path=None):
+        path = path or self._file
         env = read_env()
-        base = os.path.dirname(self._file)
+        base = os.path.dirname(path)
+        stem = os.path.splitext(os.path.basename(path))[0]
         names = {
             "split": env.get("CUSTOM_SPLIT_DIR", "").strip() or DEFAULT_DIRS["split"],
             "merge": env.get("CUSTOM_MERGE_DIR", "").strip() or DEFAULT_DIRS["merge"],
             "output": env.get("CUSTOM_OUTPUT_DIR", "").strip() or DEFAULT_DIRS["output"],
         }
-        return {k: os.path.join(base, v) for k, v in names.items()}
+        dirs = {k: os.path.normpath(os.path.join(base, v)) for k, v in names.items()}
+        # Each source file gets its own working folders, so several files in one folder don't mix
+        dirs["split"] = os.path.join(dirs["split"], stem)
+        dirs["merge"] = os.path.join(dirs["merge"], stem)
+        return dirs
 
-    def _final_path(self):
-        name = os.path.splitext(os.path.basename(self._file))[0]
+    def _final_path(self, path=None):
+        path = path or self._file
+        name = os.path.splitext(os.path.basename(path))[0]
         if self._naming() == "suffix":
             filename = f"{name}_translated.srt"
         else:
             # Movie.he.srt - video players load it automatically next to Movie.mkv
             filename = f"{name}.{self._target_lang()}.srt"
-        return os.path.join(self._dirs()["output"], filename)
+        return os.path.join(self._dirs(path)["output"], filename)
 
     def _api_key(self):
         return read_env().get("GEMINI_API_KEY", "").strip()
@@ -178,6 +188,7 @@ class Api:
             "bom": self._env_flag("SUBTITLE_BOM", False),
             "models": [{"id": k, **v} for k, v in MODELS.items()],
             "file": self._file_info() if self._file else None,
+            "queue": self._queue_info(),
             "busy": self._busy,
         }
         return state
@@ -197,27 +208,95 @@ class Api:
             "final": final if os.path.exists(final) else None,
         }
 
-    def pick_file(self):
+    def _dialog(self, kind, **kwargs):
         dialog = getattr(webview, "FileDialog", None)
-        dialog_type = dialog.OPEN if dialog else webview.OPEN_DIALOG
-        result = self._window.create_file_dialog(
-            dialog_type, file_types=("SRT files (*.srt)", "All files (*.*)")
-        )
+        types_ = {"open": (dialog.OPEN if dialog else webview.OPEN_DIALOG),
+                  "folder": (dialog.FOLDER if dialog else webview.FOLDER_DIALOG)}
+        result = self._window.create_file_dialog(types_[kind], **kwargs)
         if not result:
-            return None
-        path = result[0] if isinstance(result, (list, tuple)) else result
-        return self.set_file(path)
+            return []
+        return list(result) if isinstance(result, (list, tuple)) else [result]
+
+    def pick_file(self):
+        paths = self._dialog("open", allow_multiple=True,
+                             file_types=("SRT files (*.srt)", "All files (*.*)"))
+        return self.set_files(paths) if paths else None
+
+    def pick_folder(self):
+        folders = self._dialog("folder")
+        return self.set_files(folders) if folders else None
+
+    def _is_output_name(self, name):
+        lower = name.lower()
+        return lower.endswith("_translated.srt") or lower.endswith(f".{self._target_lang()}.srt")
+
+    def _expand(self, paths):
+        """Files as given, folders expanded to the source SRT files directly inside them."""
+        files = []
+        for path in paths:
+            if os.path.isdir(path):
+                for name in sorted(os.listdir(path), key=str.lower):
+                    full = os.path.join(path, name)
+                    if os.path.isfile(full) and name.lower().endswith(".srt") and not self._is_output_name(name):
+                        files.append(full)
+            elif os.path.isfile(path) and path.lower().endswith(".srt"):
+                files.append(path)
+        seen = set()
+        return [f for f in files if not (f in seen or seen.add(f))]
+
+    def set_files(self, paths):
+        if self._busy:
+            return {"error": "busy"}
+        paths = [p for p in (paths or []) if p]
+        if len(paths) == 1 and os.path.isfile(paths[0]):
+            return self.set_file(paths[0])
+        files = self._expand(paths)
+        if not files:
+            return {"error": "no_srt_in_folder" if any(os.path.isdir(p) for p in paths) else "not_srt"}
+        if len(files) == 1:
+            return self.set_file(files[0])
+        self._queue = [{"path": f, "status": "pending", "final": None, "error": ""} for f in files]
+        self._file = files[0]
+        return {"file": self._file_info(), "queue": self._queue_info()}
 
     def set_file(self, path):
+        if self._busy:
+            return {"error": "busy"}
         if not path or not os.path.isfile(path):
             return {"error": "file_not_found"}
         if not path.lower().endswith(".srt"):
             return {"error": "not_srt"}
         self._file = path
+        self._queue = []
         info = self._file_info()
         if info["blocks"] == 0:
-            return {"error": "empty_srt", "file": info}
-        return {"file": info}
+            return {"error": "empty_srt", "file": info, "queue": []}
+        return {"file": info, "queue": []}
+
+    def select_queue_item(self, path):
+        if self._busy or not any(q["path"] == path for q in self._queue):
+            return {"error": "busy" if self._busy else "file_not_found"}
+        self._file = path
+        return {"file": self._file_info(), "queue": self._queue_info()}
+
+    def remove_queue_item(self, path):
+        if self._busy:
+            return {"error": "busy"}
+        self._queue = [q for q in self._queue if q["path"] != path]
+        if len(self._queue) == 1:
+            return self.set_file(self._queue[0]["path"])
+        if self._file == path:
+            self._file = self._queue[0]["path"] if self._queue else None
+        return {"file": self._file_info() if self._file else None, "queue": self._queue_info()}
+
+    def _queue_info(self):
+        out = []
+        for q in self._queue:
+            final = self._final_path(q["path"])
+            out.append({"path": q["path"], "name": os.path.basename(q["path"]), "status": q["status"],
+                        "error": q["error"], "final": final if os.path.exists(final) else None,
+                        "current": q["path"] == self._file})
+        return out
 
     def refresh_file(self):
         return self._file_info() if self._file else None
@@ -355,6 +434,8 @@ class Api:
                 return {"error": "no_file"}
             self._busy = True
             self._cancel.clear()
+            self._usage_base = {}
+            self._usage_total = {}
 
         def runner():
             stream = LogStream(self._log)
@@ -378,7 +459,8 @@ class Api:
             finally:
                 self._busy = False
                 self._send("done", job=name, ok=ok and not result.get("failed"), cancelled=cancelled,
-                           result=result, file=self._file_info())
+                           result=result, file=self._file_info() if self._file else None,
+                           queue=self._queue_info())
 
         self._send("started", job=name)
         threading.Thread(target=runner, daemon=True).start()
@@ -399,6 +481,13 @@ class Api:
         self._send("stage", stage="split", status="done")
         return {"parts": parts}
 
+    @staticmethod
+    def _add_usage(a, b):
+        return {k: a.get(k, 0) + b.get(k, 0) for k in ("input", "output", "thinking", "cost", "calls")}
+
+    def _send_usage(self, engine):
+        self._send("usage", **self._add_usage(self._usage_base, engine.usage))
+
     def _engine(self, api_key):
         return TranslationEngine(api_key=api_key, model=self._model(), thinking_level=self._thinking(),
                                  flex=self._flex(), source_lang=self._source_lang(),
@@ -416,7 +505,7 @@ class Api:
 
         def progress(current, total, filename):
             self._send("progress", stage="translate", current=current, total=total, filename=filename)
-            self._send("usage", **engine.usage)
+            self._send_usage(engine)
 
         engine = self._engine(api_key)
         try:
@@ -434,7 +523,8 @@ class Api:
             ok, summary = translate_directory(dirs["split"], dirs["merge"], engine,
                                               progress_callback=progress, workers=self._workers())
         finally:
-            self._send("usage", **engine.usage)
+            self._send_usage(engine)
+            self._usage_total = self._add_usage(self._usage_base, engine.usage)
         if not ok:
             self._send("stage", stage="translate", status="error")
             raise RuntimeError("Some parts failed translation. Run again to retry only the failed parts.")
@@ -530,6 +620,45 @@ class Api:
             write_env("CHUNK_SIZE", str(chunk_size))
         return chunk_size
 
+    def _do_batch(self, chunk_size, api_key):
+        total = len(self._queue)
+        for q in self._queue:
+            if q["status"] != "done":
+                q["status"], q["error"] = "pending", ""
+        for i, q in enumerate(self._queue):
+            if self._cancel.is_set():
+                raise Cancelled()
+            if q["status"] == "done" and os.path.exists(self._final_path(q["path"])):
+                continue
+            self._file = q["path"]
+            q["status"] = "running"
+            self._send("batch", current=i + 1, total=total, name=os.path.basename(q["path"]),
+                       file=self._file_info(), queue=self._queue_info())
+            self._log(f"[{i + 1}/{total}] {os.path.basename(q['path'])}", "head")
+            try:
+                self._do_pipeline(chunk_size, api_key)
+                q["status"] = "done"
+            except Cancelled:
+                q["status"] = "pending"
+                raise
+            except Exception as e:
+                sys.stdout.flush()
+                q["status"], q["error"] = "failed", str(e)
+                self._log(f"{os.path.basename(q['path'])}: {e}", "error")
+            finally:
+                self._usage_base = self._usage_total or self._usage_base
+                self._send("queue", queue=self._queue_info())
+        done = sum(q["status"] == "done" for q in self._queue)
+        failed = [os.path.basename(q["path"]) for q in self._queue if q["status"] == "failed"]
+        u = self._usage_base
+        if u:
+            self._log(f"Batch total: {u.get('calls', 0)} call(s), ${u.get('cost', 0):.4f}")
+        if failed:
+            self._log(f"{done}/{total} files translated. Failed: {', '.join(failed)} - run again to retry them.", "error")
+            return {"failed": failed}
+        self._log(f"All {total} files translated.", "success")
+        return {"batch": total}
+
     def run_pipeline(self, chunk_size):
         chunk = self._check_chunk(chunk_size)
         if not chunk:
@@ -537,6 +666,8 @@ class Api:
         key = self._api_key()
         if not key:
             return {"error": "no_key"}
+        if len(self._queue) > 1:
+            return self._start_job("batch", self._do_batch, chunk, key)
         return self._start_job("pipeline", self._do_pipeline, chunk, key)
 
     def run_split(self, chunk_size):
@@ -575,8 +706,8 @@ def main():
 
             def on_drop(e):
                 files = (e.get("dataTransfer") or {}).get("files") or []
-                path = files[0].get("pywebviewFullPath") if files else None
-                result = api.set_file(path) if path else {"error": "file_not_found"}
+                paths = [f.get("pywebviewFullPath") for f in files if f.get("pywebviewFullPath")]
+                result = api.set_files(paths) if paths else {"error": "file_not_found"}
                 api._send("file_dropped", result=result)
 
             window.dom.document.events.dragenter += DOMEventHandler(lambda e: None, True, True)

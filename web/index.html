@@ -74,7 +74,10 @@
           <div class="drop-title" data-i18n="drop_title"></div>
           <div class="drop-sub" data-i18n="drop_sub"></div>
         </div>
-        <button class="btn ghost" id="browse-btn" data-i18n="browse"></button>
+        <div class="drop-actions">
+          <button class="btn ghost" id="folder-btn" data-i18n="browse_folder"></button>
+          <button class="btn ghost" id="browse-btn" data-i18n="browse"></button>
+        </div>
       </div>
 
       <div class="file-card hidden" id="file-card">
@@ -89,6 +92,14 @@
           <div class="stat"><div class="stat-v" id="stat-parts">–</div><div class="stat-l" data-i18n="stat_parts"></div></div>
         </div>
         <button class="btn ghost sm" id="change-btn" data-i18n="change"></button>
+      </div>
+
+      <div class="queue hidden" id="queue">
+        <div class="queue-head">
+          <span id="queue-title"></span>
+          <button class="link-btn" id="queue-add" data-i18n="queue_add"></button>
+        </div>
+        <div class="queue-list" id="queue-list"></div>
       </div>
     </section>
 
