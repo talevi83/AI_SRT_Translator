@@ -11,7 +11,6 @@ Unlike traditional word-for-word translators, this tool leverages LLMs to unders
 * 🚀 **Automated Workflow:** Process entire subtitle files quickly and efficiently.
 
  ---
-# AI SRT Translator
 
 A desktop app that translates `.srt` subtitle files from **English to Hebrew** using Google **Gemini** — while keeping every subtitle block, index and timestamp exactly in sync with the original.
 
