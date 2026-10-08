@@ -26,6 +26,7 @@
     renderModels();
     renderLangs();
     renderFile();
+    renderQA();
     document.title = t("brand");
   }
 
@@ -62,6 +63,7 @@
     const job = JOB_PAGES.includes(page);
     $("#file-zone").classList.toggle("hidden", !job);
     $("#log-wrap").classList.toggle("hidden", !job);
+    $("#qa").classList.toggle("hidden", !(job && state.qa));
     $("#result").classList.toggle("hidden", !(job && state.file && state.file.final));
     $(".main").scrollTop = 0;
   }
@@ -133,7 +135,47 @@
   syncChunk($("#chunk-split"), $("#chunk"));
 
   // ---------- stages ----------
+  // ---------- quality check ----------
+  function renderQA() {
+    const q = state.qa, box = $("#qa");
+    box.classList.toggle("hidden", !q || !JOB_PAGES.includes(state.page));
+    if (!q) return;
+    box.classList.toggle("clean", !q.total);
+    $("#qa-title").textContent = q.total ? t("qa_title", { n: q.total }) : t("qa_clean");
+    const kinds = t("qa_kind");
+    $("#qa-chips").innerHTML = "";
+    Object.entries(q.counts || {}).forEach(([k, n]) => {
+      const c = document.createElement("span");
+      c.className = "qa-chip " + k; c.textContent = `${kinds[k] || k} · ${n}`;
+      $("#qa-chips").appendChild(c);
+    });
+    const fix = $("#run-fix");
+    fix.classList.toggle("hidden", !q.fixable);
+    fix.textContent = t("qa_fix", { n: q.fixable });
+    fix.title = t("qa_fix_note");
+    const list = $("#qa-list");
+    list.innerHTML = "";
+    const details = t("qa_detail");
+    q.issues.forEach(i => {
+      const row = document.createElement("div");
+      row.className = "qa-row";
+      row.innerHTML = `<span class="qa-i" dir="ltr"></span><span class="qa-k"></span><span class="qa-t" dir="auto"></span>`;
+      row.children[0].textContent = "#" + i.index;
+      const d = details[i.kind] && i.detail ? " · " + details[i.kind].replace("{d}", i.detail) : "";
+      row.children[1].textContent = (kinds[i.kind] || i.kind) + d;
+      row.children[2].textContent = i.text;
+      list.appendChild(row);
+    });
+    if (q.total > q.issues.length) {
+      const more = document.createElement("div");
+      more.className = "muted"; more.textContent = t("qa_more", { shown: q.issues.length, n: q.total });
+      list.appendChild(more);
+    }
+  }
+  $("#run-fix").addEventListener("click", () => startJob("run_fix"));
+
   function resetStages() {
+    state.qa = null; renderQA();
     $$(".stage").forEach(s => (s.dataset.status = ""));
     ["split", "translate", "merge"].forEach(s => ($(`#st-${s}-sub`).textContent = ""));
     setProgress(0);
@@ -171,7 +213,7 @@
   function setBusy(b) {
     state.busy = b;
     document.body.classList.toggle("busy", b);
-    $$("#run-pipeline, #run-split, #run-translate, #run-merge").forEach(x => (x.disabled = b));
+    $$("#run-pipeline, #run-split, #run-translate, #run-merge, #run-fix").forEach(x => (x.disabled = b));
   }
   async function startJob(fn, ...args) {
     if (!api) return;
@@ -200,6 +242,7 @@
         setBusy(true);
         $("#result").classList.add("hidden");
         if (e.job === "pipeline") resetStages();
+        if (e.job !== "fix" && e.job !== "pipeline") { state.qa = null; renderQA(); }
         if (e.job === "translate") { $("#trans-progress").style.width = "0%"; $("#trans-status").textContent = ""; }
         renderUsage(null);
         log(`▶ ${e.job}`, "head");
@@ -217,6 +260,9 @@
         break;
       case "usage":
         renderUsage(e);
+        break;
+      case "qa":
+        state.qa = e; renderQA();
         break;
       case "progress": {
         const txt = t("st_progress", { c: e.current, t: e.total });

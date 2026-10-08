@@ -101,6 +101,20 @@ window.I18N = {
       ["שמירה בתוכנה", "עבור למסך ההגדרות, הדבק את המפתח ולחץ שמירה. זהו — אפשר לתרגם.", "למסך ההגדרות", "#settings"]
     ],
 
+    qa_title: "בדיקת איכות: {n} בעיות",
+    qa_clean: "בדיקת איכות: לא נמצאו בעיות",
+    qa_more: "מוצגות {shown} מתוך {n}",
+    qa_show: "הצג את הבלוקים",
+    qa_fix: "תקן אוטומטית ({n})",
+    qa_kind: {
+      untranslated: "לא תורגם",
+      tags: "תגיות עיצוב",
+      lines: "יותר מ-2 שורות",
+      long: "שורה ארוכה",
+      fast: "מהירות קריאה גבוהה"
+    },
+    qa_detail: { lines: "{d} שורות", long: "{d} תווים", fast: "{d} תווים/שנייה", tags: "{d}" },
+    qa_fix_note: "בעיות של מהירות קריאה מוצגות לידיעה בלבד — לפעמים אי אפשר לקצר בלי לאבד משמעות.",
     result_title: "הקובץ המתורגם מוכן",
     open_file: "פתח קובץ",
     open_folder: "פתח תיקייה",
@@ -236,6 +250,20 @@ window.I18N = {
       ["Save it in the app", "Open Settings, paste the key and hit Save. That's it — you're ready to translate.", "Open Settings", "#settings"]
     ],
 
+    qa_title: "Quality check: {n} issues",
+    qa_clean: "Quality check: no issues found",
+    qa_more: "Showing {shown} of {n}",
+    qa_show: "Show the blocks",
+    qa_fix: "Fix automatically ({n})",
+    qa_kind: {
+      untranslated: "Not translated",
+      tags: "Formatting tags",
+      lines: "More than 2 lines",
+      long: "Long line",
+      fast: "Fast reading speed"
+    },
+    qa_detail: { lines: "{d} lines", long: "{d} chars", fast: "{d} chars/sec", tags: "{d}" },
+    qa_fix_note: "Reading-speed issues are informational — sometimes a line can't be shortened without losing meaning.",
     result_title: "Translated file is ready",
     open_file: "Open file",
     open_folder: "Open folder",

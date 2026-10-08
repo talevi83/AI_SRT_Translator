@@ -334,6 +334,20 @@ body.busy .btn.primary:disabled::after {
 
 /* ============ LOG ============ */
 .log-wrap { display: flex; flex-direction: column; gap: 8px; }
+.qa { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 18px; display: flex; flex-direction: column; gap: 10px; }
+.qa.clean .qa-title { color: var(--ok); }
+.qa-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.qa-title { font-weight: 700; }
+.qa-chips { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; }
+.qa-chip { font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 99px; background: rgba(245,158,11,.14); color: var(--warn); }
+.qa-chip.untranslated, .qa-chip.tags { background: rgba(239,68,68,.12); color: var(--err); }
+.qa-details summary { cursor: pointer; font-size: 13px; color: var(--text-2); }
+.qa-details:not(:has(.qa-row)) { display: none; }
+.qa-list { max-height: 220px; overflow: auto; margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+.qa-row { display: grid; grid-template-columns: 56px 130px 1fr; gap: 10px; font-size: 12.5px; padding: 6px 8px; border-radius: 8px; background: var(--panel-2); }
+.qa-row .qa-i { font-family: var(--mono); color: var(--text-3); }
+.qa-row .qa-k { color: var(--warn); font-weight: 600; }
+.qa-row .qa-t { white-space: pre-wrap; }
 .log-head { display: flex; justify-content: space-between; align-items: center; font-size: 12.5px; font-weight: 700; color: var(--text-3); text-transform: uppercase; letter-spacing: .04em; padding-inline: 4px; }
 .log {
   height: 210px; overflow-y: auto; padding: 12px 14px;

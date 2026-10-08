@@ -19,8 +19,9 @@ import webview
 from dotenv import dotenv_values, set_key
 
 from srt_utils import compare_structure, list_srt_parts, merge_srt_files, parse_srt, split_srt_file
+import qa
 from translator import (DEFAULT_MODEL, LANGUAGES, MODELS, RTL_LANGUAGES, Cancelled, TranslationEngine,
-                        load_or_build_glossary, translate_directory)
+                        load_or_build_glossary, looks_translated, translate_directory)
 
 APP_NAME = "AI SRT Translator"
 
@@ -398,6 +399,13 @@ class Api:
         self._send("stage", stage="split", status="done")
         return {"parts": parts}
 
+    def _engine(self, api_key):
+        return TranslationEngine(api_key=api_key, model=self._model(), thinking_level=self._thinking(),
+                                 flex=self._flex(), source_lang=self._source_lang(),
+                                 target_lang=self._target_lang(),
+                                 convert_units=self._env_flag("CONVERT_UNITS", True),
+                                 instructions=self._instructions(), cancel_event=self._cancel)
+
     def _do_translate(self, api_key):
         dirs = self._dirs()
         if self._count_srt(dirs["split"]) == 0:
@@ -410,11 +418,7 @@ class Api:
             self._send("progress", stage="translate", current=current, total=total, filename=filename)
             self._send("usage", **engine.usage)
 
-        engine = TranslationEngine(api_key=api_key, model=self._model(), thinking_level=self._thinking(),
-                                   flex=self._flex(), source_lang=self._source_lang(),
-                                   target_lang=self._target_lang(),
-                                   convert_units=self._env_flag("CONVERT_UNITS", True),
-                                   instructions=self._instructions(), cancel_event=self._cancel)
+        engine = self._engine(api_key)
         try:
             if self._auto_glossary():
                 try:
@@ -455,8 +459,52 @@ class Api:
         else:
             self._log(f"Merged {len(files)} files ({count} blocks) -> {final}")
             self._log(f"Warning - the merged file doesn't match the source: {reason}", "warn")
+        self._run_qa(final)
         self._send("stage", stage="merge", status="done")
         return {"final": final}
+
+    def _run_qa(self, final):
+        issues = qa.check(parse_srt(self._file), parse_srt(final), self._target_lang(), looks_translated)
+        counts = qa.summarize(issues)
+        if issues:
+            parts = ", ".join(f"{n} {kind}" for kind, n in counts.items())
+            self._log(f"Quality check: {len(issues)} issue(s) - {parts}.", "warn")
+        else:
+            self._log("Quality check: no issues found.", "success")
+        fixable = sum(1 for i in issues if i["kind"] in qa.FIXABLE)
+        self._send("qa", counts=counts, issues=issues[:200], total=len(issues), fixable=fixable)
+        return issues
+
+    def _do_fix(self, api_key):
+        final = self._final_path()
+        if not os.path.exists(final):
+            raise ValueError("No translated file yet. Run the pipeline first.")
+        issues = qa.check(parse_srt(self._file), parse_srt(final), self._target_lang(), looks_translated)
+        fixable = [i for i in issues if i["kind"] in qa.FIXABLE]
+        if not fixable:
+            self._log("Nothing to fix automatically.", "success")
+            return {}
+        print(f"Re-translating {len({i['index'] for i in fixable})} block(s) flagged by the quality check...")
+        engine = self._engine(api_key)
+        glossary_path = os.path.join(self._dirs()["merge"], "glossary.txt")
+        if self._auto_glossary() and os.path.exists(glossary_path):
+            with open(glossary_path, encoding="utf-8") as f:
+                engine.set_glossary(f.read().partition("\n")[2].strip())
+        try:
+            replaced = qa.fix_issues(engine, self._file, final, fixable,
+                                     rtl_fix=self._target_lang() in RTL_LANGUAGES,
+                                     bom=self._env_flag("SUBTITLE_BOM", False))
+        finally:
+            self._send("usage", **engine.usage)
+        self._log(f"Replaced {replaced} block(s) in {final}", "success")
+        self._run_qa(final)
+        return {"final": final}
+
+    def run_fix(self):
+        key = self._api_key()
+        if not key:
+            return {"error": "no_key"}
+        return self._start_job("fix", self._do_fix, key)
 
     def _do_pipeline(self, chunk_size, api_key):
         self._do_split(chunk_size)
