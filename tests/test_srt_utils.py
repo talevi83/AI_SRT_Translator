@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from srt_utils import (RLM, compare_structure, decode_srt_bytes, extract_part_number, fix_rtl_line,
+from srt_utils import (PDF, RLE, RLM, compare_structure, decode_srt_bytes, extract_part_number, fix_rtl_line,
                        fix_rtl_text, list_srt_parts, merge_srt_files, parse_srt, parse_srt_text,
                        split_srt_file, validate_translation)
 
@@ -69,10 +69,14 @@ def test_decode_cp1255_hebrew():
 
 
 def test_rtl_fix():
-    assert fix_rtl_line("שלום.") == f"{RLM}שלום.{RLM}"
-    assert fix_rtl_line(fix_rtl_line("שלום.")) == f"{RLM}שלום.{RLM}"  # idempotent
+    assert fix_rtl_line("שלום.") == f"{RLM}{RLE}שלום.{PDF}{RLM}"
+    assert fix_rtl_line(fix_rtl_line("שלום.")) == f"{RLM}{RLE}שלום.{PDF}{RLM}"  # idempotent
+    assert fix_rtl_line(f"{RLM}שלום.{RLM}") == f"{RLM}{RLE}שלום.{PDF}{RLM}"  # upgrades old output
     assert fix_rtl_line("Hello.") == "Hello."
-    assert fix_rtl_text("<i>מה?</i>\nOK") == f"{RLM}<i>מה?</i>{RLM}\nOK"
+    assert fix_rtl_text("<i>מה?</i>\nOK") == f"{RLM}{RLE}<i>מה?</i>{PDF}{RLM}\nOK"
+    # Hebrew with an embedded English acronym / a line starting with English is embedded too
+    assert fix_rtl_line("את ה-GPR למטה בצינור, תודיעו לנו.") == f"{RLM}{RLE}את ה-GPR למטה בצינור, תודיעו לנו.{PDF}{RLM}"
+    assert fix_rtl_line("FBI, פתחו!") == f"{RLM}{RLE}FBI, פתחו!{PDF}{RLM}"
 
 
 def test_validate_translation():

@@ -2,7 +2,7 @@ import json
 from types import SimpleNamespace
 
 import qa
-from srt_utils import RLM, parse_srt, parse_srt_text, write_srt
+from srt_utils import PDF, RLE, RLM, parse_srt, parse_srt_text, write_srt
 from translator import Item, TranslationEngine, looks_translated
 
 SOURCE = """1
@@ -81,5 +81,5 @@ def test_fix_replaces_only_flagged_blocks(tmp_path):
     assert replaced == 3  # blocks 1, 2 and 4 - block 3 only reads fast, which isn't auto-fixed
     assert [x["text"] for x in sent[0]["subtitles"]] == ["<i>Hello there.</i>", "How are you?", "Fine."]
     out = parse_srt(str(final))
-    assert out[0].text == f"{RLM}<i>מתוקן</i>{RLM}" and out[2].text == "רוץ מהר ככל שאתה יכול!"
+    assert out[0].text == f"{RLM}{RLE}<i>מתוקן</i>{PDF}{RLM}" and out[2].text == "רוץ מהר ככל שאתה יכול!"
     assert [b.timestamp for b in out] == [b.timestamp for b in parse_srt(str(src))]

@@ -83,7 +83,7 @@ def test_batch_translates_every_file_and_continues_after_a_failure(api, tmp_path
     statuses = {q["name"]: q["status"] for q in api._queue_info()}
     assert statuses == {"S01E01.srt": "done", "S01E02.srt": "failed", "S01E03.srt": "done"}
     out = app.parse_srt(str(season / "translated_file" / "S01E03.he.srt"))
-    assert out[0].text.strip("\u200f") == "שורה S01E03 1"
+    assert out[0].text.strip("\u200f\u202b\u202c") == "שורה S01E03 1"
     assert api._usage_base["calls"] > 0
 
     # Running again retries only the failed file

@@ -8,7 +8,9 @@ INDEX_RE = re.compile(r'^\s*\d+\s*$')
 
 # Right-to-left scripts (Hebrew, Arabic, Persian, ...) and the Unicode marks used to fix them
 RTL_CHARS_RE = re.compile(r'[֐-׿؀-ۿݐ-ݿיִ-﷿ﹰ-﻿]')
-RLM = '‏'
+RLM = '‏'  # right-to-left mark
+RLE = '‫'  # right-to-left embedding
+PDF = '‬'  # pop directional formatting
 _BIDI_MARKS_RE = re.compile(r'^[‎‏‪-‮]+|[‎‏‪-‮]+$')
 
 
@@ -128,14 +130,20 @@ def write_srt(blocks, output_file, bom=False):
 
 def fix_rtl_line(line):
     """
-    Wrap a right-to-left line with RLM marks so players that render with a left-to-right
-    base direction don't move the punctuation to the wrong end ("שלום." -> ".שלום").
+    Make a right-to-left line display correctly in every player.
+
+    Many players render subtitles with a left-to-right base direction. RLM marks alone only
+    fix punctuation at the edges ("שלום." -> ".שלום"); a line that mixes in Latin text
+    ("את ה-GPR למטה בצינור.") still has its Hebrew runs laid out left-to-right, scrambling
+    the sentence. Wrapping the line in an RTL embedding (RLE ... PDF) forces right-to-left
+    layout; the outer RLMs keep auto-detecting players RTL even when the line starts with
+    an English word, and keep the old behaviour in players that ignore embeddings.
     Idempotent: existing bidi marks at the edges are replaced.
     """
     core = _BIDI_MARKS_RE.sub('', line)
     if not RTL_CHARS_RE.search(core):
         return core
-    return f"{RLM}{core}{RLM}"
+    return f"{RLM}{RLE}{core}{PDF}{RLM}"
 
 
 def fix_rtl_text(text):
